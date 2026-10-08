@@ -1,0 +1,259 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{C99248BD-8555-47E8-AE52-642F6FADDE9C}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>RevisedDVRoute</RootNamespace>
+    <AssemblyName>RevisedDVRoute</AssemblyName>
+    <!-- CommsRadioAPI 1.0.3 is built for .NET Framework 4.8. -->
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <!-- The command-line property overrides this local development default. -->
+    <DVInstallPath Condition="'$(DVInstallPath)' == '' and Exists('D:\Games\Derail Valley\DerailValley_Data\Managed\Assembly-CSharp.dll')">D:\Games\Derail Valley</DVInstallPath>
+    <DVManagedPath Condition="'$(DVInstallPath)' != ''">$(DVInstallPath)\DerailValley_Data\Managed</DVManagedPath>
+    <DVModsPath Condition="'$(DVInstallPath)' != ''">$(DVInstallPath)\Mods</DVModsPath>
+    <FrameworkPathOverride>$(DVManagedPath)\</FrameworkPathOverride>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
+    <TargetFrameworkProfile>
+    </TargetFrameworkProfile>
+    <BuildGameCopy Condition="'$(BuildGameCopy)' == ''">false</BuildGameCopy>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>0</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>$(DVManagedPath)\UnityModManager\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(DVManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="BezierCurves">
+      <HintPath>$(DVManagedPath)\BezierCurves.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="CommandTerminal">
+      <HintPath>$(DVManagedPath)\CommandTerminal.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="CommsRadioAPI">
+      <HintPath>$(DVModsPath)\CommsRadioAPI\CommsRadioAPI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.Interaction">
+      <HintPath>$(DVManagedPath)\DV.Interaction.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.PointSet">
+      <HintPath>$(DVManagedPath)\DV.PointSet.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.RailTrack">
+      <HintPath>$(DVManagedPath)\DV.RailTrack.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.SignPlacer">
+      <HintPath>$(DVManagedPath)\DV.SignPlacer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.SignPlacer.Utils">
+      <HintPath>$(DVManagedPath)\DV.SignPlacer.Utils.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.BrakeSystem">
+      <HintPath>$(DVManagedPath)\DV.BrakeSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.Simulation">
+      <HintPath>$(DVManagedPath)\DV.Simulation.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.ThingTypes">
+      <HintPath>$(DVManagedPath)\DV.ThingTypes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="DV.Utils">
+      <HintPath>$(DVManagedPath)\DV.Utils.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.CSharp, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PriorityQueue, Version=5.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\OptimizedPriorityQueue.5.1.0\lib\net45\PriorityQueue.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(DVManagedPath)\Unity.TextMeshPro.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(DVManagedPath)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(DVManagedPath)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(DVManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(DVManagedPath)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(DVManagedPath)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(DVManagedPath)\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>$(DVManagedPath)\UnityEngine.UnityWebRequestModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityModManager">
+      <HintPath>$(DVManagedPath)\UnityModManager\UnityModManager.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="WorldStreamer">
+      <HintPath>$(DVManagedPath)\WorldStreamer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ActiveRoute.cs" />
+    <Compile Include="ControlsOverriderRemote.cs" />
+    <Compile Include="AudioUtils.cs" />
+    <Compile Include="Compatibility\DriverAssistCompatibilityPatch.cs" />
+    <Compile Include="Compatibility\AITrafficCompatibility.cs" />
+    <Compile Include="Compatibility\DoubleTrackCompatibility.cs" />
+    <Compile Include="Compatibility\DVSignalsCompatibility.cs" />
+    <Compile Include="Compatibility\DVSignalsRouteReservation.cs" />
+    <Compile Include="Compatibility\MphCompatibility.cs" />
+    <Compile Include="CommsRadio\RouteManagerStates.cs" />
+    <Compile Include="LocoCruiseControl.cs" />
+    <Compile Include="LocoAI.cs" />
+    <Compile Include="Extensions\GameObjectExtension.cs" />
+    <Compile Include="Extensions\JunctionExtension.cs" />
+    <Compile Include="Extensions\TrainsetExtension.cs" />
+    <Compile Include="Internals\Unzip.cs" />
+    <Compile Include="PathFinder.cs" />
+    <Compile Include="Module.cs" />
+    <Compile Include="PathMapMarkers.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Extensions\RailTrackExtension.cs" />
+    <Compile Include="Route.cs" />
+    <Compile Include="RouteCommand.cs" />
+    <Compile Include="RouteTask.cs" />
+    <Compile Include="RouteTracker.cs" />
+    <!-- <Compile Include="CommsRadio\Selector.cs" /> -->
+    <Compile Include="Extensions\StringExtension.cs" />
+    <Compile Include="Internals\SimpleJson.cs" />
+    <Compile Include="Settings.cs" />
+    <Compile Include="UnityAsync\Awaiters\AsyncOperationAwaiter.cs" />
+    <Compile Include="UnityAsync\Awaiters\IEnumeratorAwaiter.cs" />
+    <Compile Include="UnityAsync\Awaiters\ResourceRequestAwaiter.cs" />
+    <Compile Include="UnityAsync\Awaiters\SynchronizationContextAwaiter.cs" />
+    <Compile Include="UnityAsync\Awaiters\YieldInstructionAwaiter.cs" />
+    <Compile Include="UnityAsync\AwaitInstructionAwaiter.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitForFrames.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitForSeconds.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitForSecondsRealtime.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitUntil.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitUntil`T.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitWhile.cs" />
+    <Compile Include="UnityAsync\AwaitInstructions\WaitWhile`T.cs" />
+    <Compile Include="UnityAsync\Await\Await.cs" />
+    <Compile Include="UnityAsync\Extensions.cs" />
+    <Compile Include="UnityAsync\IAwaitInstruction.cs" />
+    <Compile Include="UnityAsync\Manager\AsyncManager.ContinuationProcessorGroup.ContinuationProcessor.cs" />
+    <Compile Include="UnityAsync\Manager\AsyncManager.ContinuationProcessorGroup.cs" />
+    <Compile Include="UnityAsync\Manager\AsyncManager.cs" />
+    <Compile Include="UnityAsync\TaskYieldInstruction.cs" />
+    <Compile Include="Utils.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+    <None Include="..\Info.json">
+      <Link>Info.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Service Include="{508349B6-6B84-4DF5-91F0-309BEEBAD82D}" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Target Name="ValidateDerailValleyReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(DVInstallPath)' == ''"
+           Text="Set DVInstallPath to the Derail Valley installation, for example /p:DVInstallPath=&quot;C:\Steam\steamapps\common\Derail Valley&quot;." />
+    <Error Condition="!Exists('$(DVManagedPath)\Assembly-CSharp.dll')"
+           Text="DVInstallPath does not contain DerailValley_Data\Managed\Assembly-CSharp.dll: $(DVInstallPath)" />
+    <Error Condition="!Exists('$(DVModsPath)\CommsRadioAPI\CommsRadioAPI.dll')"
+           Text="CommsRadioAPI 1.0.3 is required at $(DVModsPath)\CommsRadioAPI\CommsRadioAPI.dll." />
+  </Target>
+
+  <Target Name="CopyToDerailValleyMods" AfterTargets="Build" Condition="'$(BuildGameCopy)' == 'true'">
+    <PropertyGroup>
+      <RevisedDVRouteModDirectory>$(DVModsPath)\$(AssemblyName)</RevisedDVRouteModDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <RevisedDVRouteAudio Include="$(ProjectDir)Resources\audio\*.wav" />
+    </ItemGroup>
+    <MakeDir Directories="$(RevisedDVRouteModDirectory);$(RevisedDVRouteModDirectory)\audio" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(RevisedDVRouteModDirectory)" />
+    <Copy SourceFiles="$(ProjectDir)..\Info.json" DestinationFolder="$(RevisedDVRouteModDirectory)" />
+    <Copy SourceFiles="@(RevisedDVRouteAudio)" DestinationFolder="$(RevisedDVRouteModDirectory)\audio" />
+  </Target>
+
+  <!-- Produces a Unity Mod Manager-ready archive beside the compiled DLL. -->
+  <Target Name="PackageRevisedDVRoute" AfterTargets="Build">
+    <PropertyGroup>
+      <RevisedDVRoutePackageDirectory>$(TargetDir)package\$(AssemblyName)</RevisedDVRoutePackageDirectory>
+      <RevisedDVRoutePackageZip>$(TargetDir)$(AssemblyName).zip</RevisedDVRoutePackageZip>
+    </PropertyGroup>
+    <ItemGroup>
+      <RevisedDVRoutePackageFiles Include="$(TargetPath);$(ProjectDir)..\Info.json;$(TargetDir)PriorityQueue.dll" />
+      <RevisedDVRoutePackageAudio Include="$(ProjectDir)Resources\audio\*.wav" />
+    </ItemGroup>
+    <RemoveDir Directories="$(RevisedDVRoutePackageDirectory)" Condition="Exists('$(RevisedDVRoutePackageDirectory)')" />
+    <MakeDir Directories="$(RevisedDVRoutePackageDirectory);$(RevisedDVRoutePackageDirectory)\audio" />
+    <Copy SourceFiles="@(RevisedDVRoutePackageFiles)" DestinationFolder="$(RevisedDVRoutePackageDirectory)" />
+    <Copy SourceFiles="@(RevisedDVRoutePackageAudio)" DestinationFolder="$(RevisedDVRoutePackageDirectory)\audio" />
+    <Exec Command="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;Compress-Archive -Path '$(RevisedDVRoutePackageDirectory)\*' -DestinationPath '$(RevisedDVRoutePackageZip)' -Force&quot;" />
+  </Target>
+</Project>

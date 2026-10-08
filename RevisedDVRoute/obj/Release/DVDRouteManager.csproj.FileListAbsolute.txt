@@ -1,0 +1,11 @@
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\DVRouteManager.dll
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\DVRouteManager.pdb
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\PriorityQueue.dll
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\PriorityQueue.pdb
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\PriorityQueue.xml
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\obj\Release\DVDRouteManager.csproj.AssemblyReference.cache
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\obj\Release\DVDRouteManager.csproj.CoreCompileInputs.cache
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\obj\Release\DVDRoute.72C004A7.Up2Date
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\obj\Release\DVRouteManager.dll
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\obj\Release\DVRouteManager.pdb
+I:\Development Files\DVRouteManager-0.3.4\DVRouteManager\bin\Release\Info.json

@@ -1,0 +1,446 @@
+﻿using CommandTerminal;
+using DV.Logic.Job;
+using RevisedDVRoute.Extensions;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using UnityEngine;
+
+namespace RevisedDVRoute
+{
+    public enum ReversingStrategy
+    {
+        NoReversing,
+        OnlyIfNeeded,
+        ChooseBest
+    }
+
+    public class Route
+    {
+        public const double REVERSE_SECTOR_LENGTH = 10.0;
+
+        public List<RailTrack> Path { get; }
+        public Track Destination { get; }
+        public double Length { get; }
+
+        public Dictionary<string, Junction> Reverses { get; } = new Dictionary<string, Junction>();
+
+        public RailTrack FirstTrack { get => Path.FirstOrDefault(); }
+        public RailTrack SecondTrack { get => Path.Skip(1).FirstOrDefault(); }
+        public RailTrack LastTrack { get => Path.LastOrDefault(); }
+
+        public Trainset Trainset { get; private set; }
+
+        public Route(List<RailTrack> path, Track destination, Trainset trainset)
+            : this(path, destination)
+        {
+            Trainset = trainset;
+        }
+        public Route(List<RailTrack> path, Track destination)
+        {
+            this.Path = path ?? throw new ArgumentNullException(nameof(path));
+            this.Destination = destination ?? throw new ArgumentNullException(nameof(destination));
+
+            IEnumerator<RailTrack> enumerator = Path.GetEnumerator();
+
+            double length = 0.0;
+
+            WalkPath((walkData) =>
+            {
+                Junction reversingJunction;
+
+                if (walkData.nextTrack != null && !walkData.currentTrack.CanGoToDirectly(walkData.prevTrack, walkData.nextTrack, out reversingJunction))
+                {
+                    if (reversingJunction != null)
+                    {
+                        Reverses.Add(walkData.junctionId, reversingJunction);
+                        Terminal.Log($"Reversing needed on junction {walkData.junctionId}");
+                    }
+                }
+
+                length = walkData.distanceFromStart;
+
+                return true;
+            });
+
+            Length = length;
+        }
+
+        public override string ToString()
+        {
+            return $"Route to {Destination.ID.FullDisplayID} {Length} length";
+        }
+
+        public string StartHeading
+        {
+            get
+            {
+                if (Path.Count < 2)
+                    return "??";
+
+                Vector2 v1 = new Vector2(Path[0].transform.position.x, Path[0].transform.position.z);
+                Vector2 v2 = new Vector2(Path[1].transform.position.x, Path[1].transform.position.z);
+
+                var v = (v2 - v1);
+
+                if (Vector2.Angle(v, Vector2.up) <= 45.0)
+                {
+                    return "N";
+                }
+                else if (Vector2.Angle(v, Vector2.right) <= 45.0)
+                {
+                    return "E";
+                }
+                else if (Vector2.Angle(v, Vector2.down) <= 45.0)
+                {
+                    return "S";
+                }
+
+
+                return "W";
+
+            }
+        }
+
+        public static string GetJunctionId(RailTrack prevTrack, RailTrack track, RailTrack nextTrack)
+        {
+            return $"{prevTrack?.LogicTrack().ID.FullID}->{track?.LogicTrack().ID.FullID}->{nextTrack?.LogicTrack().ID.FullID}";
+        }
+
+        public class WalkPathData
+        {
+            public RailTrack prevTrack;
+            public RailTrack currentTrack;
+            public RailTrack nextTrack;
+            public string junctionId;
+            public int pathIndex;
+            public double distanceFromStart;
+        }
+
+        /// <summary>
+        /// Goes throuh whole path and calls callback with current, previous and next track
+        /// </summary>
+        /// <param name="callback"></param>
+        public void WalkPath(Func<WalkPathData, bool> callback)
+        {
+            IEnumerator<RailTrack> enumerator = Path.GetEnumerator();
+
+            WalkPathData walkData = new WalkPathData();
+            walkData.pathIndex = -1;
+            walkData.distanceFromStart = 0.0;
+
+            if (enumerator.MoveNext())
+            {
+                RailTrack prevTrack = null;
+
+                while (enumerator.Current != null)
+                {
+                    var track = enumerator.Current;
+
+#if DEBUG2
+                    Terminal.Log($"Track ID: {track.LogicTrack().ID.FullID}");
+#endif
+
+                    RailTrack nextTrack = null;
+
+                    if (enumerator.MoveNext())
+                        nextTrack = enumerator.Current;
+
+                    string junctionId = GetJunctionId(prevTrack, track, nextTrack);
+
+
+                    walkData.prevTrack = prevTrack;
+                    walkData.currentTrack = track;
+                    walkData.nextTrack = nextTrack;
+                    walkData.junctionId = junctionId;
+                    walkData.pathIndex++;
+
+                    if (!callback(walkData))
+                    {
+                        break;
+                    }
+
+                    if (nextTrack == null)
+                        break;
+
+                    if (Reverses.ContainsKey(junctionId))
+                    {
+                        walkData.distanceFromStart += REVERSE_SECTOR_LENGTH;
+                    }
+                    else
+                    {
+                        walkData.distanceFromStart += track.LogicTrack().length;
+                    }
+
+                    prevTrack = track;
+                }
+            }
+        }
+
+        public void AdjustSwitches()
+        {
+            AdjustSwitches(true);
+        }
+
+        internal void AdjustSwitchesForSignalReservation()
+        {
+            AdjustSwitches(false);
+        }
+
+        private void AdjustSwitches(bool beginSignalReservation)
+        {
+            int count = 0;
+
+            HashSet<Junction> junctionsForReversing = new HashSet<Junction>();
+
+            WalkPath((walkData) =>
+            {
+                Junction reversingJunction = null;
+
+                Reverses.TryGetValue(walkData.junctionId, out reversingJunction);
+
+
+                if (walkData.currentTrack.inJunction != null && walkData.prevTrack != null)
+                {
+                    string branches = "[" + walkData.currentTrack.inJunction.outBranches.Select(b => b.track.LogicTrack().ID.FullID).Aggregate((a, b) => a + "|" + b) + "]";
+#if DEBUG
+                        Terminal.Log($"InJunction track: {walkData.currentTrack.LogicTrack().ID.FullID} nexttrack {walkData.nextTrack.LogicTrack().ID.FullID} inbranch {walkData.currentTrack.inJunction.inBranch.track.LogicTrack().ID.FullID} outbranches {branches} selectedBranch {walkData.currentTrack.inJunction.selectedBranch}");
+#endif
+                    if (!junctionsForReversing.Contains(walkData.currentTrack.inJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.prevTrack, walkData.currentTrack.inJunction))
+                    {
+                        count++;
+                    }
+                }
+
+                if (walkData.currentTrack.outJunction != null && walkData.nextTrack != null)
+                {
+                    string branches = "[" + walkData.currentTrack.outJunction.outBranches.Select(b => b.track.LogicTrack().ID.FullID).Aggregate((a, b) => a + "|" + b) + "]";
+#if DEBUG
+                        Terminal.Log($"OutJunction track: {walkData.currentTrack.LogicTrack().ID.FullID} nexttrack {walkData.nextTrack.LogicTrack().ID.FullID} inbranch {walkData.currentTrack.outJunction.inBranch.track.LogicTrack().ID.FullID} outbranches {branches} selectedBranch {walkData.currentTrack.outJunction.selectedBranch}");
+#endif
+                    if (!junctionsForReversing.Contains(walkData.currentTrack.outJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.nextTrack, walkData.currentTrack.outJunction))
+                    {
+                        count++;
+                    }
+                }
+
+                if (reversingJunction != null)
+                {
+#if DEBUG
+                    Terminal.Log($"reversing junction {reversingJunction.GetInstanceID()}");
+#endif
+                    junctionsForReversing.Add(reversingJunction);
+                }
+
+                // Rotate turntable to align with the path entry/exit spurs
+                if (walkData.prevTrack != null && walkData.nextTrack != null)
+                {
+                    TurntableRailTrack trt;
+                    if (PathFinder._turntableTrackToTRT != null &&
+                        PathFinder._turntableTrackToTRT.TryGetValue(walkData.currentTrack, out trt) && trt != null)
+                    {
+                        var entryEnd = trt.trackEnds?.FirstOrDefault(te => te?.track == walkData.prevTrack);
+                        if (entryEnd != null)
+                        {
+                            trt.targetYRotation = entryEnd.angle;
+                            trt.RotateToTargetRotation(true);
+                            count++;
+                            Terminal.Log($"Turntable rotated to {entryEnd.angle:0.#}° ({walkData.prevTrack.LogicTrack().ID.FullID} → {walkData.nextTrack.LogicTrack().ID.FullID})");
+                        }
+                    }
+                }
+
+                return true;
+            });
+
+            if (beginSignalReservation || count > 0)
+                Terminal.Log($"Switched {count}");
+
+            // Route Manager only asks DV Signals for the next governing block
+            // after its own route switches have been aligned. This lets DV
+            // Signals validate the actual selected path, and lets AI Traffic
+            // yield through its existing player-priority behavior.
+            if (beginSignalReservation
+                && Module.ActiveRoute != null
+                && Module.ActiveRoute.Route == this)
+                Compatibility.DVSignalsCompatibility.BeginPlayerRouteReservation(this);
+
+        }
+
+        private static bool SwitchJunctionIfNeeded(RailTrack track, RailTrack nextTrack, Junction junction)
+        {
+            int branchIndex = -1;
+
+            RailTrack trackToSwitch = junction.inBranch.track == track ? nextTrack : track;
+
+            for (int i = 0; i < junction.outBranches.Count; i++)
+            {
+                if (junction.outBranches[i].track == trackToSwitch)
+                {
+                    branchIndex = i;
+                    break;
+                }
+            }
+
+            if (branchIndex != -1 && branchIndex != junction.selectedBranch)
+            {
+                string reservationOwner;
+                if (!Compatibility.DVSignalsCompatibility.CanSwitchJunction(junction, out reservationOwner))
+                {
+                    Compatibility.DVSignalsCompatibility.LogBlockedJunctionSwitch(junction, reservationOwner);
+                    return false;
+                }
+
+                Terminal.Log($"Switch {track.LogicTrack().ID.FullID} -> {trackToSwitch.LogicTrack().ID.FullID}");
+                junction.Switch(Junction.SwitchMode.NO_SOUND);
+                return true;
+            }
+
+            return false;
+        }
+
+
+        public WalkPathData GetPrevTrack(RailTrack currentTrack, RailTrack nextTrack)
+        {
+            WalkPathData result = null;
+
+            WalkPath((walkData) =>
+            {
+                if (currentTrack == walkData.currentTrack && nextTrack == walkData.nextTrack)
+                {
+                    result = walkData;
+                    return false;
+                }
+
+                return true;
+            });
+
+            return result;
+        }
+
+        public WalkPathData GetNextTrack(RailTrack currentTrack, RailTrack prevTrack)
+        {
+            WalkPathData result = null;
+
+            WalkPath((walkData) =>
+            {
+                if (currentTrack == walkData.currentTrack && prevTrack == walkData.prevTrack)
+                {
+                    result = walkData;
+                    return false;
+                }
+
+                return true;
+            });
+
+            return result;
+        }
+
+        public RailTrack GetPrevTrack(RailTrack currentTrack)
+        {
+            RailTrack result = null;
+
+            WalkPath((walkData) =>
+            {
+                if (currentTrack == walkData.currentTrack)
+                {
+                    result = walkData.nextTrack;
+                    return false;
+                }
+
+                return true;
+            });
+
+            return result;
+        }
+
+        public async Task<Route> FindOppositeRoute()
+        {
+            if (FirstTrack == null || SecondTrack == null || LastTrack == null)
+                throw new CommandException("Active route is too short to flip");
+
+            var trackTransitions = new List<TrackTransition>
+            {
+                new TrackTransition() { track = FirstTrack, nextTrack = SecondTrack }
+            };
+
+            string startId = FirstTrack.LogicTrack().ID.FullID;
+            string excludedNextId = SecondTrack.LogicTrack().ID.FullID;
+            string destinationId = LastTrack.LogicTrack().ID.FullID;
+            Module.mod?.Logger.Log("Opposite-heading route requested: " + startId
+                + " -> " + destinationId + "; excluding initial direction through "
+                + excludedNextId + ".");
+
+            try
+            {
+                return await Route.FindRoute(FirstTrack.LogicTrack(), LastTrack.LogicTrack(),
+                    Module.settings.ReversingStrategy, Trainset, trackTransitions);
+            }
+            catch (CommandException exception)
+            {
+                Module.mod?.Logger.Log("Opposite-heading route unavailable in the loaded track layout: "
+                    + startId + " -> " + destinationId + "; excluded " + excludedNextId
+                    + "; planner result: " + exception.Message + ".");
+                throw new CommandException("No opposite-heading path in loaded layout");
+            }
+        }
+
+        public async static Task<Route> FindRoute(Track begin, Track end, ReversingStrategy reversingStrategy, Trainset trainset, List<TrackTransition> trackTransitions = null)
+        {
+            if (begin.ID.FullID == end.ID.FullID)
+                throw new CommandException("You're already there");
+
+            Route route = await FindRoute(begin, end, trainset, false, trackTransitions);
+
+            if (reversingStrategy != ReversingStrategy.NoReversing && (route == null || reversingStrategy == ReversingStrategy.ChooseBest))
+            {
+#if DEBUG
+                Terminal.Log($"Trying path with allowed reversing");
+#endif
+                var routeWithReversing = await FindRoute(begin, end, trainset, true, trackTransitions);
+
+                if (routeWithReversing != null)
+                {
+                    Terminal.Log($"withoutreversing: {route?.Length} withReversing: {routeWithReversing.Length}");
+
+                    route = (route == null || route.Length > routeWithReversing.Length) ? routeWithReversing : route;
+                }
+            }
+
+            if (route == null)
+            {
+                throw new CommandException("Route not found in loaded track layout");
+            }
+
+            Terminal.Log($"Found {route}");
+
+            return route;
+        }
+
+        private async static Task<Route> FindRoute(Track begin, Track end, Trainset trainset, bool allowReverses, List<TrackTransition> trackTransitions = null)
+        {
+            PathFinder pathFinder = new PathFinder(begin, end);
+
+            double consistLength = 30.0;
+
+            if (trainset != null)
+            {
+                consistLength = trainset.Length();
+            }
+
+            var path = await pathFinder.FindPath(
+                allowReverses, consistLength, trackTransitions, trainset);
+
+            if (path == null || path.Count == 0)
+                return null;
+
+            return new Route(path, end, trainset);
+        }
+
+
+    }
+
+}
