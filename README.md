@@ -1,8 +1,8 @@
 # Revised DV Route
 
-Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations let route planning account for DV Signals reservations and DoubleTrack's loaded rail layout.
+Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations support DV Signals interlocking, AI Traffic right-of-way, and both DoubleTrack layouts.
 
-> **Version:** 0.5.5  
+> **Version:** 1.0.0  
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
 ## Highlights
@@ -12,8 +12,9 @@ Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It 
 - Provides route information, train information, route reversal, a train-end alarm, and route clearing through the Comms Radio.
 - Includes PID-based cruise control for supported locomotives, including DM3 and steam locomotives.
 - Includes experimental locomotive AI and freight-haul automation.
-- Respects active DV Signals reservations when that optional mod is enabled.
-- Routes appropriately for the DoubleTrack layout actually loaded in the current world.
+- Respects existing DV Signals and AI Traffic reservations and maintains a rolling player-route block reservation.
+- Exposes the reserved player route to AI Traffic through DV Signals so conflicting AI trains can yield.
+- Routes appropriately for the DoubleTrack layout actually loaded in the current world and excludes its abandoned and deliberate derailment tracks.
 - Shows dependency and compatibility status directly in Unity Mod Manager's F10 panel.
 
 ## Requirements
@@ -49,15 +50,21 @@ Create a route using one of these starting points:
 
 After a route is found, Revised DV Route aligns the required junctions where it is safe to do so. The route summary reports length, initial heading, locations travelled through, and required reversals.
 
+When DV Signals route reservation is enabled, the mod requests the next signal block on the active route. It retries if that block is occupied, releases it only after the rear of the train clears the block, and then requests the next one. A junction protected by another reservation is left unchanged.
+
 ### Active route
 
 An active route provides:
 
 - Live route-tracker status and remaining distance.
 - Train length, car count, and weight.
-- Route-direction changes when a reverse route can be planned.
+- Opposite-heading route changes when the loaded rail graph provides another path from the same origin.
 - A train-end alarm.
 - Clearing the current route.
+
+### Map route colors
+
+The green and red marks on the map are route-direction markers placed approximately every 200 metres. Green shows the initial movement direction. The color changes to red at the first planned reversal and alternates after each additional reversal. They are not live signal aspects or block-occupancy indicators.
 
 ### Cruise control and locomotive AI
 
@@ -72,15 +79,18 @@ All integrations below are optional unless marked required. Revised DV Route doe
 | Mod | Status | Revised DV Route behavior |
 |---|---|---|
 | CommsRadioAPI | Required | Supplies the Comms Radio mode and controls. |
-| [DoubleTrack](https://github.com/Chump-the-Lump/DV-DoubleTrack) | Optional | Detects the physical layout currently loaded by DoubleTrack. Normal layout routes prefer right-hand-running paired lanes and avoid unnecessary crossovers. Hard layout routes use its loaded topology without Normal-layout lane assumptions. |
-| DV Signals | Optional | Avoids reserved intermediate tracks and does not automatically change a junction protected by an active signal reservation. It does **not** create, claim, or release DV Signals reservations. |
+| [DoubleTrack](https://github.com/Chump-the-Lump/DV-DoubleTrack) | Optional | Detects the physical layout currently loaded by DoubleTrack. Normal layout routes prefer right-hand-running paired lanes and avoid unnecessary crossovers. Hard layout routes use its loaded topology without Normal-layout lane assumptions. Tracks tagged by DoubleTrack as `Abandoned` or `Derail-*` are never selected. |
+| DV Signals | Optional | Strongly prefers unreserved blocks, retains reserved single-corridor tracks as a last-resort route, and never changes a junction protected by a foreign reservation. For the active player route it reserves one governing signal block at a time and releases each block after the complete train clears it. |
+| [AI Traffic](https://github.com/Killermops27/dv-ai-traffic) | Optional; requires DV Signals for player right-of-way | Reads AI Traffic's active track reservations before each route search and strongly prefers an unreserved path. AI Traffic recognizes Revised DV Route's non-AI DV Signals reservation as player right-of-way. Conflicting AI trains keep their physical-safety and approach-locking protections while yielding when safe. Enable **Player Priority** in AI Traffic for player-first dispatching behavior. |
 | DriverAssist | Optional | Includes compatibility safeguards so known job-registration and unsupported-locomotive conditions do not abort game loading. |
-| Revised_Mph | Optional | Uses the MPH value displayed by converted speed signs when calculating AI speed targets. |
-| Advanced Dispatcher System | Not integrated yet | No ADS-panel route publishing is included in this release. This will be handled as a separate future integration. |
+| Revised_Mph | Optional | Loads before Revised DV Route and uses the MPH value displayed by converted speed signs when calculating AI speed targets. Runtime enable/disable changes are detected automatically. |
+| Advanced Dispatcher System | Not integrated yet | ADS and Revised DV Route currently calculate independent routes, so their displayed paths can differ. No ADS-panel route publishing is included in this release. |
 
 ### DoubleTrack Normal and Hard layouts
 
 DoubleTrack's selected setting and the rails in the current world can temporarily differ. Revised DV Route deliberately routes according to the **loaded** rails, not only the value saved in `Settings.xml`.
+
+Hard mode represents removed corridors with connected `Abandoned` RailTrack objects and also adds deliberate `Derail-*` spurs. Revised DV Route explicitly blocks both categories; it does not assume that every connected RailTrack is safe merely because it remains in the live rail graph.
 
 When changing DoubleTrack between Normal and Hard:
 
@@ -103,7 +113,8 @@ The panel reports each supported mod as:
 It also supplies integration-specific detail:
 
 - DoubleTrack's selected and active layout state.
-- Whether DV Signals reservation protection is enabled.
+- Whether DV Signals protection and the rolling player reservation are enabled, including the currently reserved signal block.
+- Whether AI Traffic reservations are considered and its Player Priority option is enabled.
 - Which dependency is required versus optional.
 
 Available settings are:
@@ -111,7 +122,8 @@ Available settings are:
 | Setting | Default | Description |
 |---|---:|---|
 | Reversing strategy | ChooseBest | Controls how the route planner considers reversals. It can also be changed through the Comms Radio settings page. |
-| Respect DV Signals reservations | Enabled | Keeps signal-reservation protection active when DV Signals is installed and enabled. Disable only if you intentionally want standard routing behavior. |
+| Respect DV Signals reservations | Enabled | Strongly discourages foreign-reserved blocks and prevents automatic changes to protected junctions. Disable only if you intentionally want standard routing behavior. |
+| Reserve next DV Signals block for active route | Enabled | Claims one rolling player-route block through DV Signals, allowing signal aspects and compatible AI traffic to honor the selected route. |
 | Train-end alarm key | `N` | Notifies the active route tracker that the train end has passed. |
 
 ## Command Terminal
@@ -138,6 +150,10 @@ route auto stop
 | DoubleTrack says `waiting for the world layout` | Load into a railway world and wait for the scene to finish loading. Create a route afterward. |
 | Normal layout is active while Hard is selected | Reload the world after saving the DoubleTrack mode. The saved selection does not replace rails already spawned in the current scene. |
 | A junction was not switched automatically | Check whether DV Signals has an active reservation on the junction. Revised DV Route leaves protected junctions unchanged. |
+| ADS shows a different route | This release does not publish Revised DV Route's path to ADS. ADS calculates its own route independently, so a different display is expected until the dedicated ADS integration is added. |
+| Flipping says no opposite-heading path exists | Flip excludes the active route's first segment and searches the live rail graph again. Some origins—especially dead ends or Hard-layout corridors—have no second departure path. The log records the excluded segment and search rejection counts. |
+| AI Traffic does not yield to the route | Confirm DV Signals and AI Traffic are enabled, enable **Player Priority** in AI Traffic, and leave both DV Signals settings enabled in Revised DV Route. The F10 panel should report an active handoff. Existing AI trains inside an approach-locking or physically occupied block retain safety priority until clear. |
+| The log says the route is waiting for a DV Signals block | Another train or signal currently owns an overlapping block. Keep the train stopped at the signal; Revised DV Route retries automatically. |
 | AI or cruise control behaves unexpectedly | Stop the automation, take manual control, and report the situation with the mod log and the route/locomotive involved. |
 
 ## Building from source
