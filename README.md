@@ -5,6 +5,10 @@ Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It 
 > **Version:** 1.0.0  
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
+## Original author credit
+
+Revised DV Route is based on the original **DV Route Manager** created by **Wally (WallyCZ)**. Wally's original design and implementation established the route-planning, route-tracking, automatic-switching, and train-control foundation on which this revised release is built. Full credit and thanks go to Wally for creating the original project and making this continued development possible.
+
 ## Highlights
 
 - Plans routes with A* pathfinding, including turntables and necessary reversals.
@@ -170,6 +174,6 @@ The build validates the game-managed assemblies and `Mods\CommsRadioAPI\CommsRad
 
 ## Credits
 
-- WallyCZ, original Route Manager author.
+- **Wally (WallyCZ)** — original creator and author of DV Route Manager; this revised project is built upon his work.
 - RouteSetter by zelmer69, a reference for CommsRadioAPI usage.
 - Derail Valley by Altfuture.
