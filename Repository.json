@@ -1,0 +1,9 @@
+{
+    "Releases": [
+        {
+            "Id": "RevisedDVRoute",
+            "Version": "1.0.0",
+            "DownloadUrl": "https://github.com/WallyCZ/DVRouteManager/releases/download/0.3.4/DVRouteManager.zip"
+        }
+    ]
+}
