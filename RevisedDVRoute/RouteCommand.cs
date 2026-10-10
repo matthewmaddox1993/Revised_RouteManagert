@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV.Logic.Job;
 using RevisedDVRoute.Extensions;
 using System;
@@ -470,6 +470,17 @@ namespace RevisedDVRoute
                 if (route.Path.SequenceEqual(alternative.Path))
                     throw new CommandException("alternate search returned the original route");
 
+                if (Compatibility.ADSCompatibility.LastBlockIsSoft
+                    && IsExcessiveDetour(route.Length, alternative.Length))
+                {
+                    Module.mod?.Logger.Log("ADS alternate route rejected as an excessive detour for a "
+                        + "signal-level conflict: original=" + Math.Round(route.Length)
+                        + " m; alternate=" + Math.Round(alternative.Length) + " m. Keeping the direct route.");
+                    LastADSAlternativeNotice = "ADS signal conflict ignored for routing: the alternate path was "
+                        + Math.Round(alternative.Length - route.Length) + " m longer. Direct route kept.";
+                    return route;
+                }
+
                 int divergenceIndex = FirstDivergenceIndex(route.Path, alternative.Path);
                 string divergenceTrack = divergenceIndex >= 0 && divergenceIndex < alternative.Path.Count
                     ? alternative.Path[divergenceIndex]?.LogicTrack()?.ID?.FullID
@@ -501,6 +512,15 @@ namespace RevisedDVRoute
             LastRouteAttemptTrainset = trainset;
             LastADSAlternativeNotice = null;
             Compatibility.ADSCompatibility.BeginRouteAttempt();
+        }
+
+        // An alternate is excessive when it is both more than twice as long
+        // as the direct route and at least 750 m longer, so short routes
+        // are not rejected over a few extra metres.
+        private static bool IsExcessiveDetour(double originalLength, double alternativeLength)
+        {
+            return alternativeLength > originalLength * 2.0
+                && alternativeLength - originalLength > 750.0;
         }
 
         private static int FirstDivergenceIndex(IList<RailTrack> original, IList<RailTrack> alternative)

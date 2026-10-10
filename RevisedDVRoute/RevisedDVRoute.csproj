@@ -228,6 +228,12 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <Content Include="Resources\audio\*.wav">
+      <TargetPath>audio\%(Filename)%(Extension)</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <ItemGroup>
     <Service Include="{508349B6-6B84-4DF5-91F0-309BEEBAD82D}" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
@@ -245,8 +251,10 @@
       <RevisedDVRouteModDirectory>$(DVModsPath)\$(AssemblyName)</RevisedDVRouteModDirectory>
     </PropertyGroup>
     <ItemGroup>
-      <RevisedDVRouteAudio Include="$(ProjectDir)Resources\audio\*.wav" />
+      <RevisedDVRouteAudio Include="$(TargetDir)audio\*.wav" />
     </ItemGroup>
+    <Error Condition="'@(RevisedDVRouteAudio)' == ''"
+           Text="No built audio assets were found in $(TargetDir)audio." />
     <MakeDir Directories="$(RevisedDVRouteModDirectory);$(RevisedDVRouteModDirectory)\audio" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(RevisedDVRouteModDirectory)" />
     <Copy SourceFiles="$(TargetDir)PriorityQueue.dll" DestinationFolder="$(RevisedDVRouteModDirectory)" />
@@ -254,20 +262,37 @@
     <Copy SourceFiles="@(RevisedDVRouteAudio)" DestinationFolder="$(RevisedDVRouteModDirectory)\audio" />
   </Target>
 
-  <!-- Produces a Unity Mod Manager-ready archive beside the compiled DLL. -->
-  <Target Name="PackageRevisedDVRoute" AfterTargets="Build">
+  <Target Name="ReadRevisedDVRouteVersion">
+    <Exec Command="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;(Get-Content -LiteralPath '$(ProjectDir)..\Info.json' -Raw | ConvertFrom-Json).Version&quot;"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_RevisedDVRouteVersionOutput" />
+    </Exec>
+    <PropertyGroup>
+      <RevisedDVRoutePackageVersion>@(_RevisedDVRouteVersionOutput)</RevisedDVRoutePackageVersion>
+    </PropertyGroup>
+    <Error Condition="'$(RevisedDVRoutePackageVersion)' == ''"
+           Text="Info.json does not contain a package Version." />
+  </Target>
+
+  <!-- Produces a versioned Unity Mod Manager-ready archive beside the compiled DLL. -->
+  <Target Name="PackageRevisedDVRoute" AfterTargets="Build" DependsOnTargets="ReadRevisedDVRouteVersion">
     <PropertyGroup>
       <RevisedDVRoutePackageDirectory>$(TargetDir)package\$(AssemblyName)</RevisedDVRoutePackageDirectory>
-      <RevisedDVRoutePackageZip>$(TargetDir)$(AssemblyName).zip</RevisedDVRoutePackageZip>
+      <RevisedDVRoutePackageZip>$(TargetDir)$(AssemblyName)-$(RevisedDVRoutePackageVersion).zip</RevisedDVRoutePackageZip>
     </PropertyGroup>
     <ItemGroup>
       <RevisedDVRoutePackageFiles Include="$(TargetPath);$(ProjectDir)..\Info.json;$(TargetDir)PriorityQueue.dll" />
-      <RevisedDVRoutePackageAudio Include="$(ProjectDir)Resources\audio\*.wav" />
+      <RevisedDVRoutePackageAudio Include="$(TargetDir)audio\*.wav" />
+      <FileWrites Include="$(RevisedDVRoutePackageZip)" />
     </ItemGroup>
+    <Error Condition="'@(RevisedDVRoutePackageAudio)' == ''"
+           Text="No built audio assets were found in $(TargetDir)audio." />
     <RemoveDir Directories="$(RevisedDVRoutePackageDirectory)" Condition="Exists('$(RevisedDVRoutePackageDirectory)')" />
     <MakeDir Directories="$(RevisedDVRoutePackageDirectory);$(RevisedDVRoutePackageDirectory)\audio" />
     <Copy SourceFiles="@(RevisedDVRoutePackageFiles)" DestinationFolder="$(RevisedDVRoutePackageDirectory)" />
     <Copy SourceFiles="@(RevisedDVRoutePackageAudio)" DestinationFolder="$(RevisedDVRoutePackageDirectory)\audio" />
+    <Delete Files="$(TargetDir)$(AssemblyName).zip" Condition="Exists('$(TargetDir)$(AssemblyName).zip')" />
     <Exec Command="powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;Compress-Archive -Path '$(RevisedDVRoutePackageDirectory)\*' -DestinationPath '$(RevisedDVRoutePackageZip)' -Force&quot;" />
   </Target>
 </Project>

@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV.Logic.Job;
 using Priority_Queue;
 using System;
@@ -78,6 +78,12 @@ namespace RevisedDVRoute
 
     public class PathFinder
     {
+        // Extra cost per track reserved by DV Signals or AI Traffic. Edge cost
+        // is length / average speed, so this equals a modest detour (a few
+        // kilometres at most per reserved track) instead of forbidding the
+        // direct route outright.
+        private const double ReservedTrackPenalty = 40.0;
+
         private RailTrack start;
         private RailTrack goal;
         private int penalizedSignalReservedTracks;
@@ -249,6 +255,9 @@ namespace RevisedDVRoute
                     continue;
                 }
 
+                if (currentCost >= bestGoalCost)
+                    continue;
+
                 List<RailTrack> neighbors = new List<RailTrack>();
                 HashSet<RailTrack> turntableDirect = new HashSet<RailTrack>();
 
@@ -362,7 +371,7 @@ namespace RevisedDVRoute
                     // The two mods can describe the same protected section.
                     // Apply one penalty while retaining separate diagnostics.
                     if (neighborSignalReserved || neighborAITrafficReserved)
-                        newCost += 5000.0;
+                        newCost += ReservedTrackPenalty;
                     if (neighborSignalReserved)
                         penalizedSignalReservedTracks++;
                     if (neighborAITrafficReserved)

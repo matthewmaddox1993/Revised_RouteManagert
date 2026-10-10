@@ -120,6 +120,10 @@ namespace RevisedDVRoute.Compatibility
                 if (!ownsReservation || !HasReservation(reservedSignal))
                 {
                     ResetReservationState();
+                    // Another signal integration released the reservation.
+                    // Do not immediately reclaim it every tracker update and
+                    // create a clear/restricted aspect fight.
+                    nextAttemptTime = Time.time + RetryInterval;
                 }
                 else if (rearPathIndex <= reservedLastPathIndex)
                 {

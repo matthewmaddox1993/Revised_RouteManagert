@@ -49,6 +49,9 @@ namespace RevisedDVRoute.Compatibility
                 if (!Module.settings.ReserveDVSignalsRoute)
                     return "reservation protection enabled; player route reservation disabled";
 
+                if (ADSCompatibility.ManagesDVSignals)
+                    return "reservation protection enabled; player signal authority delegated to ADS";
+
                 return "reservation protection enabled; " + DVSignalsRouteReservation.StatusDescription;
             }
         }
@@ -178,7 +181,8 @@ namespace RevisedDVRoute.Compatibility
             {
                 return ProtectionEnabled
                     && Module.settings != null
-                    && Module.settings.ReserveDVSignalsRoute;
+                    && Module.settings.ReserveDVSignalsRoute
+                    && !ADSCompatibility.ManagesDVSignals;
             }
         }
 

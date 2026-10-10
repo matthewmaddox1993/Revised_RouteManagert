@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV.Logic.Job;
 using RevisedDVRoute.Extensions;
 using System;
@@ -21,6 +21,7 @@ namespace RevisedDVRoute
     public class Route
     {
         public const double REVERSE_SECTOR_LENGTH = 10.0;
+        private const double SWITCH_ALIGNMENT_LOOKAHEAD_METERS = 2000.0;
 
         public List<RailTrack> Path { get; }
         public Track Destination { get; }
@@ -202,6 +203,15 @@ namespace RevisedDVRoute
             if (currentPathIndex < 0)
                 return;
 
+            // A reversing or looping route can encounter the same junction
+            // more than once with a different desired branch. Aligning every
+            // occurrence in one pass makes the junction switch away and then
+            // immediately back, which also makes DV Signals alternate its
+            // aspect continuously. The first remaining occurrence is the one
+            // the train will reach next; a later tracker pass will handle any
+            // subsequent occurrence after the train advances.
+            var handledJunctions = new HashSet<Junction>();
+
             WalkPath((walkData) =>
             {
                 if (walkData.pathIndex < currentPathIndex)
@@ -213,6 +223,13 @@ namespace RevisedDVRoute
                 double transitionPosition = walkData.distanceFromStart
                     + walkData.currentTrack.LogicTrack().length;
 
+                // The whole route is aligned once when it is created. Runtime
+                // repair only needs a bounded look-ahead, avoiding a complete
+                // scan of a long route twice per second and leaving distant
+                // junctions available to other traffic until they are needed.
+                if (transitionPosition > currentPosition + SWITCH_ALIGNMENT_LOOKAHEAD_METERS)
+                    return false;
+
                 // The junction is already behind the leading end of the
                 // consist.  Do not change it even if another train has since
                 // left it in a different position.
@@ -220,7 +237,9 @@ namespace RevisedDVRoute
                     return true;
 
                 Junction junction = GetJunctionBetween(walkData.currentTrack, walkData.nextTrack);
-                if (junction != null && junction.IsFree())
+                if (junction != null
+                    && handledJunctions.Add(junction)
+                    && junction.IsFree())
                     SwitchJunctionIfNeeded(walkData.currentTrack, walkData.nextTrack, junction);
 
                 return true;
@@ -301,6 +320,7 @@ namespace RevisedDVRoute
             int count = 0;
 
             HashSet<Junction> junctionsForReversing = new HashSet<Junction>();
+            HashSet<Junction> handledJunctions = new HashSet<Junction>();
 
             WalkPath((walkData) =>
             {
@@ -315,7 +335,7 @@ namespace RevisedDVRoute
 #if DEBUG
                         Terminal.Log($"InJunction track: {walkData.currentTrack.LogicTrack().ID.FullID} nexttrack {walkData.nextTrack.LogicTrack().ID.FullID} inbranch {walkData.currentTrack.inJunction.inBranch.track.LogicTrack().ID.FullID} outbranches {branches} selectedBranch {walkData.currentTrack.inJunction.selectedBranch}");
 #endif
-                    if (!junctionsForReversing.Contains(walkData.currentTrack.inJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.prevTrack, walkData.currentTrack.inJunction))
+                    if (handledJunctions.Add(walkData.currentTrack.inJunction) && !junctionsForReversing.Contains(walkData.currentTrack.inJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.prevTrack, walkData.currentTrack.inJunction))
                     {
                         count++;
                     }
@@ -327,7 +347,7 @@ namespace RevisedDVRoute
 #if DEBUG
                         Terminal.Log($"OutJunction track: {walkData.currentTrack.LogicTrack().ID.FullID} nexttrack {walkData.nextTrack.LogicTrack().ID.FullID} inbranch {walkData.currentTrack.outJunction.inBranch.track.LogicTrack().ID.FullID} outbranches {branches} selectedBranch {walkData.currentTrack.outJunction.selectedBranch}");
 #endif
-                    if (!junctionsForReversing.Contains(walkData.currentTrack.outJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.nextTrack, walkData.currentTrack.outJunction))
+                    if (handledJunctions.Add(walkData.currentTrack.outJunction) && !junctionsForReversing.Contains(walkData.currentTrack.outJunction) && SwitchJunctionIfNeeded(walkData.currentTrack, walkData.nextTrack, walkData.currentTrack.outJunction))
                     {
                         count++;
                     }

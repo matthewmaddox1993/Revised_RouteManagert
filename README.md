@@ -2,10 +2,10 @@
 
 Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations support DV Signals interlocking, AI Traffic right-of-way, and both DoubleTrack layouts.
 
-> **Version:** 1.0.2<br>
+> **Version:** 1.0.1<br>
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete 1.0.2 update notes.
+See [CHANGELOG.md](CHANGELOG.md) for the complete 1.0.1 update notes.
 
 ## Original author credit
 
@@ -18,7 +18,7 @@ Revised DV Route is based on the original **DV Route Manager** created by **Wall
 - Provides route information, train information, route reversal, a train-end alarm, and route clearing through the Comms Radio.
 - Includes PID-based cruise control for supported locomotives, including DM3 and steam locomotives.
 - Includes experimental locomotive AI and freight-haul automation.
-- Respects existing DV Signals and AI Traffic reservations and maintains a rolling player-route block reservation.
+- Respects existing DV Signals and AI Traffic reservations and maintains a rolling player-route block reservation when ADS is not managing signal synchronization.
 - Exposes the reserved player route to AI Traffic through DV Signals so conflicting AI trains can yield.
 - Routes appropriately for the DoubleTrack layout actually loaded in the current world and excludes its abandoned and deliberate derailment tracks.
 - Shows dependency and compatibility status directly in Unity Mod Manager's F10 panel.
@@ -56,7 +56,7 @@ Create a route using one of these starting points:
 
 After a route is found, Revised DV Route aligns the required junctions where it is safe to do so. The route summary reports length, initial heading, locations travelled through, and required reversals.
 
-When DV Signals route reservation is enabled, the mod requests the next signal block on the active route. It retries if that block is occupied, releases it only after the rear of the train clears the block, and then requests the next one. A junction protected by another reservation is left unchanged.
+When DV Signals route reservation is enabled, the mod requests the next signal block on the active route. It retries if that block is occupied, releases it only after the rear of the train clears the block, and then requests the next one. A junction protected by another reservation is left unchanged. If ADS's DV Signals synchronization adapter is active, Revised DV Route delegates signal authority to ADS and does not create a competing rolling reservation.
 
 ### Active route
 
@@ -86,11 +86,11 @@ All integrations below are optional unless marked required. Revised DV Route doe
 |---|---|---|
 | CommsRadioAPI | Required | Supplies the Comms Radio mode and controls. |
 | [DoubleTrack](https://github.com/Chump-the-Lump/DV-DoubleTrack) | Optional | Detects the physical layout currently loaded by DoubleTrack. Normal layout routes prefer right-hand-running paired lanes and avoid unnecessary crossovers. Hard layout routes use its loaded topology without Normal-layout lane assumptions. Tracks tagged by DoubleTrack as `Abandoned` or `Derail-*` are never selected. |
-| DV Signals | Optional | Strongly prefers unreserved blocks, retains reserved single-corridor tracks as a last-resort route, and never changes a junction protected by a foreign reservation. For the active player route it reserves one governing signal block at a time and releases each block after the complete train clears it. |
+| DV Signals | Optional | Strongly prefers unreserved blocks, retains reserved single-corridor tracks as a last-resort route, and never changes a junction protected by a foreign reservation. For the active player route it reserves one governing signal block at a time and releases each block after the complete train clears it, unless signal authority is delegated to ADS. |
 | [AI Traffic](https://github.com/Killermops27/dv-ai-traffic) | Optional; requires DV Signals for player right-of-way | Reads AI Traffic's active track reservations before each route search and strongly prefers an unreserved path. AI Traffic recognizes Revised DV Route's non-AI DV Signals reservation as player right-of-way. Conflicting AI trains keep their physical-safety and approach-locking protections while yielding when safe. Enable **Player Priority** in AI Traffic for player-first dispatching behavior. |
 | DriverAssist | Optional | Includes compatibility safeguards so known job-registration and unsupported-locomotive conditions do not abort game loading. |
 | Revised_Mph | Optional | Loads before Revised DV Route and uses the MPH value displayed by converted speed signs when calculating AI speed targets. Runtime enable/disable changes are detected automatically. |
-| Advanced Dispatcher System | Optional, read-only ADS integration | Checks matching ADS route warnings and ADS's live route locks, occupancy, and reserved/stop-signal protection, even when no separate ADS route plan exists. A matching interrupted/failed ADS route remains eligible for five minutes so reservation-loss warnings are not missed. A blocking track or governing stop signal causes one additional search with affected rails excluded. The result identifies the alternate path's first divergence so it cannot silently return the original route. If no different path exists, no blocked route is activated. Protected ADS switch locks are honored during initial and live alignment. Revised DV Route does not publish its route to ADS, reserve routes there, or change ADS state. |
+| Advanced Dispatcher System | Optional, read-only ADS integration | Checks matching ADS route warnings and ADS's live route locks, occupancy, and reserved/stop-signal protection, even when no separate ADS route plan exists. A matching interrupted/failed ADS route remains eligible for five minutes so reservation-loss warnings are not missed. A blocking track or governing stop signal causes one additional search with affected rails excluded. The result identifies the alternate path's first divergence so it cannot silently return the original route. If no different path exists, no blocked route is activated. Protected ADS switch locks are honored during initial and live alignment. When ADS's DV Signals adapter is loaded, ADS remains the sole reservation/aspect authority so signals do not fight between clear and restricted. Revised DV Route does not publish its route to ADS, reserve routes there, or change ADS state. |
 
 ### DoubleTrack Normal and Hard layouts
 
@@ -119,7 +119,7 @@ The panel reports each supported mod as:
 It also supplies integration-specific detail:
 
 - DoubleTrack's selected and active layout state.
-- Whether DV Signals protection and the rolling player reservation are enabled, including the currently reserved signal block.
+- Whether DV Signals protection and the rolling player reservation are enabled, delegated to ADS, or currently holding a signal block.
 - Whether AI Traffic reservations are considered and its Player Priority option is enabled.
 - Which dependency is required versus optional.
 
@@ -129,7 +129,7 @@ Available settings are:
 |---|---:|---|
 | Reversing strategy | ChooseBest | Controls how the route planner considers reversals. It can also be changed through the Comms Radio settings page. |
 | Respect DV Signals reservations | Enabled | Strongly discourages foreign-reserved blocks and prevents automatic changes to protected junctions. Disable only if you intentionally want standard routing behavior. |
-| Reserve next DV Signals block for active route | Enabled | Claims one rolling player-route block through DV Signals, allowing signal aspects and compatible AI traffic to honor the selected route. |
+| Reserve next DV Signals block for active route | Enabled | Claims one rolling player-route block through DV Signals, allowing signal aspects and compatible AI traffic to honor the selected route. This write path is automatically delegated to ADS when its signal adapter is active. |
 | Train-end alarm key | `N` | Notifies the active route tracker that the train end has passed. |
 
 ## Command Terminal
@@ -170,7 +170,7 @@ Visual Studio 2022 (or MSBuild), the .NET Framework 4.8 Developer Pack, a Derail
 MSBuild RevisedDVRoute\RevisedDVRoute.csproj /t:Rebuild /p:Configuration=Release /p:DVInstallPath="C:\Steam\steamapps\common\Derail Valley"
 ```
 
-The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute.zip`. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
+The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.1.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
 
 For an isolated test build, select the **Test** solution configuration in Visual Studio/Rider or run:
 

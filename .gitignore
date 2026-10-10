@@ -1,0 +1,15 @@
+# IDE and user-local state
+/.idea/
+*.sln.DotSettings.user
+
+# Build output
+/RevisedDVRoute/bin/
+/RevisedDVRoute/obj/
+/DVRouteManager.zip
+/.bin/
+/.obj/
+
+# Local development notes
+/.claude/
+/PORTING_NOTES.md
+/SESSION_RESUME.md
