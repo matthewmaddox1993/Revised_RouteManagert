@@ -1,5 +1,6 @@
 ﻿using CommandTerminal;
 using DV;
+using RevisedDVRoute.Compatibility;
 using RevisedDVRoute.Internals;
 using System;
 using System.Collections;
@@ -122,21 +123,32 @@ namespace RevisedDVRoute.CommsRadio
                     if (Module.ActiveRoute.Route.Reverses.Count > 0)
                         routeInfo += $"\nReverses: {Module.ActiveRoute.Route.Reverses.Count}";
 
+                    routeInfo = ADSCompatibility.AppendRouteWarningNotice(routeInfo,
+                        RouteCommand.LastRouteAttemptTrainset);
+                    if (!string.IsNullOrWhiteSpace(RouteCommand.LastADSAlternativeNotice))
+                        routeInfo += "\n" + RouteCommand.LastADSAlternativeNotice;
+
                     page.RedirectToMessagePage(routeInfo, "MENU");
                 }
                 else
                 {
-                    page.RedirectToMessagePage("Route not found", "MENU");
+                    string failure = ADSCompatibility.AppendFailureNotice("Route not found",
+                        RouteCommand.LastRouteAttemptTrainset);
+                    page.RedirectToMessagePage(failure, "MENU");
                 }
             }
             catch (CommandException exc)
             {
-                page.RedirectToMessagePage(exc.Message, "MENU");
+                string failure = ADSCompatibility.AppendFailureNotice(exc.Message,
+                    RouteCommand.LastRouteAttemptTrainset);
+                page.RedirectToMessagePage(failure, "MENU");
             }
             catch (Exception exc)
             {
                 Terminal.Log(exc.Message + ": " + exc.StackTrace);
-                page.RedirectToMessagePage("Error in building path, see console", "MENU");
+                string failure = ADSCompatibility.AppendFailureNotice("Error in building path, see console",
+                    RouteCommand.LastRouteAttemptTrainset);
+                page.RedirectToMessagePage(failure, "MENU");
             }
         }
     }

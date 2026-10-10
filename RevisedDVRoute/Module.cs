@@ -154,8 +154,8 @@ namespace RevisedDVRoute
             DrawCompatibilityRow("DoubleTrack", "DoubleTrack", false, Compatibility.DoubleTrackCompatibility.StatusDescription);
             DrawCompatibilityRow("DV Signals", "DVSignals", false, Compatibility.DVSignalsCompatibility.StatusDescription);
             DrawCompatibilityRow("AI Traffic", "AITraffic", false, Compatibility.AITrafficCompatibility.StatusDescription);
-            DrawCompatibilityRow("ADS (not yet integrated)", "AdvancedDispatcherSystem", false,
-                "independent routing; Revised DV Route path is not published to ADS");
+            DrawCompatibilityRow("Advanced Dispatcher System", "AdvancedDispatcherSystem", false,
+                Compatibility.ADSCompatibility.StatusDescription);
             DrawCompatibilityRow("DriverAssist", "DriverAssist", false, null);
             DrawCompatibilityRow("Revised_Mph", "Revised_Mph", false, null);
             GUILayout.EndVertical();

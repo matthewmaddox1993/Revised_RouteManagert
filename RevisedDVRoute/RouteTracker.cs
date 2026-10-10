@@ -35,6 +35,7 @@ namespace RevisedDVRoute
         public RouteTaskChain TaskChain { get; protected set; }
 
         private double notifyTrainEndPosition = double.MaxValue;
+        private float nextSwitchAlignmentTime;
 
         public Trainset Trainset { get; protected set; }
 
@@ -79,6 +80,7 @@ namespace RevisedDVRoute
 
             Route = route;
             ElapsedTime = 0.0f;
+            nextSwitchAlignmentTime = 0.0f;
 
             TrackState = TrackingState.BeforeStart;
 
@@ -338,7 +340,33 @@ namespace RevisedDVRoute
                 }
             }
 
-            bool isOnTrack = pathData != null && (pathData.nextTrack == null || pathData.nextTrack == car.trackNext);
+            // Route switches are initially aligned when the route starts, but
+            // AI Traffic and manual interaction can change one afterwards.
+            // Retry the still-ahead transitions during route tracking. A
+            // small interval keeps this from walking a long route every frame.
+            if (pathData != null && Time.time >= nextSwitchAlignmentTime)
+            {
+                Route.AdjustSwitchesAhead(pathData.pathIndex, posFromStart);
+                nextSwitchAlignmentTime = Time.time + 0.5f;
+            }
+
+            bool transitionAligned = pathData != null
+                && (pathData.nextTrack == null || Route.IsTransitionAligned(pathData));
+            bool headingMatches = pathData != null
+                && (pathData.nextTrack == null || !car.moving || pathData.nextTrack == car.trackNext);
+            bool isOnTrack = transitionAligned && headingMatches;
+
+            if (transitionAligned && !car.moving && pathData != null
+                && pathData.currentTrack == car.track
+                && pathData.nextTrack != null)
+            {
+                // UpdatePosition only refreshes trackNext while a car is
+                // moving.  A corrected switch can therefore leave a stopped
+                // AI with a stale cached next track. Do not replace it while
+                // moving: that value is also how the tracker detects a train
+                // travelling in the wrong direction along a valid path.
+                car.trackNext = pathData.nextTrack;
+            }
 
 #if DEBUG2
             if(!isOnTrack)

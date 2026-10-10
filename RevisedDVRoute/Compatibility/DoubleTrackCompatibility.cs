@@ -145,6 +145,22 @@ namespace RevisedDVRoute.Compatibility
             }
 
             RailTrack[] tracks = UnityEngine.Object.FindObjectsOfType<RailTrack>();
+            RailTrack[] registeredTracks;
+            try
+            {
+                // RailTrackRegistryBase throws while the game is still on the
+                // main menu. Treat that expected startup state as "not loaded"
+                // so the compatibility monitor remains alive for the world load.
+                registeredTracks = RailTrackRegistryBase.RailTracks?
+                    .Where(track => track != null)
+                    .ToArray() ?? new RailTrack[0];
+            }
+            catch (NullReferenceException)
+            {
+                currentLayout = LayoutSnapshot.Empty;
+                return;
+            }
+
             var doubleTrackSections = new HashSet<RailTrack>();
             var crossoverSections = new HashSet<RailTrack>();
             var candidates = new List<RailTrack>();
@@ -171,8 +187,7 @@ namespace RevisedDVRoute.Compatibility
             // logical connections as well as active scene objects so those
             // hidden rails cannot slip through the route graph.
             var unsafeSeeds = new List<RailTrack>(tracks);
-            if (RailTrackRegistryBase.RailTracks != null)
-                unsafeSeeds.AddRange(RailTrackRegistryBase.RailTracks.Where(track => track != null));
+            unsafeSeeds.AddRange(registeredTracks);
             unsafeSeeds.AddRange(doubleTrackSections);
             HashSet<RailTrack> unsafeSections = FindUnsafeConnectedSections(unsafeSeeds);
 

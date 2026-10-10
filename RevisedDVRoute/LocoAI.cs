@@ -423,14 +423,20 @@ namespace RevisedDVRoute
             Track carTrack = freightTrainset.firstCar.Bogies[0].track.LogicTrack();
             Track locoTrack = loco.trainset.firstCar.Bogies[0].track.LogicTrack();
 
-            var toCarsTask = Route.FindRoute(locoTrack, carTrack, ReversingStrategy.ChooseBest, loco.trainset);
+            // The target cars intentionally occupy this destination track, so
+            // the approach-to-couple leg cannot treat destination occupancy as
+            // an ADS obstruction. The post-coupling leg below uses the full
+            // ADS safety check once every car belongs to this consist.
+            var toCarsTask = Route.FindRoute(
+                locoTrack, carTrack, ReversingStrategy.ChooseBest, loco.trainset);
             while (!toCarsTask.IsCompleted) yield return null;
 
             if (!_freightHaulActive) yield break;
 
             if (toCarsTask.IsFaulted || toCarsTask.Result == null)
             {
-                Terminal.Log("Freight haul: cannot find route to cars – " + (toCarsTask.Exception?.InnerException?.Message ?? "null"));
+                Terminal.Log("Freight haul: cannot find route to cars – "
+                    + (toCarsTask.Exception?.InnerException?.Message ?? "null"));
                 _freightHaulActive = false;
                 yield break;
             }
@@ -457,17 +463,23 @@ namespace RevisedDVRoute
             Terminal.Log($"Freight haul: phase 3 – routing to {task.DestinationTrack.ID.FullID}");
 
             Track nowTrack = loco.trainset.firstCar.Bogies[0].track.LogicTrack();
-            var toDestTask = Route.FindRoute(nowTrack, task.DestinationTrack, ReversingStrategy.ChooseBest, loco.trainset);
+            var toDestTask = RouteCommand.FindRouteWithADSAlternative(
+                nowTrack, task.DestinationTrack, ReversingStrategy.ChooseBest, loco.trainset);
             while (!toDestTask.IsCompleted) yield return null;
 
             if (!_freightHaulActive) yield break;
 
             if (toDestTask.IsFaulted || toDestTask.Result == null)
             {
-                Terminal.Log("Freight haul: cannot find route to destination – " + (toDestTask.Exception?.InnerException?.Message ?? "null"));
+                string failure = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    toDestTask.Exception?.InnerException?.Message ?? "Route to destination was not found",
+                    loco.trainset);
+                Terminal.Log("Freight haul: cannot find route to destination – " + failure);
                 _freightHaulActive = false;
                 yield break;
             }
+
+            LogADSRouteResult("Freight haul: route to destination ready", loco.trainset);
 
             var chain2 = RouteTaskChain.FromDestination(task.DestinationTrack, loco.trainset);
             var tracker2 = new RouteTracker(chain2, true);
@@ -487,6 +499,14 @@ namespace RevisedDVRoute
             _freightHaulActive = false;
             Terminal.Log("Freight haul: complete!");
             Module.PlayClip(Module.trainEnd);
+        }
+
+        private static void LogADSRouteResult(string result, Trainset trainset)
+        {
+            string message = Compatibility.ADSCompatibility.AppendRouteWarningNotice(result, trainset);
+            if (!string.IsNullOrWhiteSpace(RouteCommand.LastADSAlternativeNotice))
+                message += "\n" + RouteCommand.LastADSAlternativeNotice;
+            Terminal.Log(message);
         }
 
         private IEnumerator TryCoupleAndReleaseHandbrakes(TrainCar loco)

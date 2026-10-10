@@ -314,7 +314,8 @@ namespace RevisedDVRoute.CommsRadio
             }
             catch (Exception e)
             {
-                _resultMessage = e.Message;
+                _resultMessage = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    e.Message, RouteCommand.LastRouteAttemptTrainset);
                 _status = ComputeStatus.Error;
                 yield break;
             }
@@ -326,7 +327,8 @@ namespace RevisedDVRoute.CommsRadio
             {
                 Exception routeException = task.Exception?.InnerException ?? task.Exception;
                 Module.mod?.Logger.LogException(routeException);
-                _resultMessage = routeException?.Message ?? "Route failed";
+                _resultMessage = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    routeException?.Message ?? "Route failed", RouteCommand.LastRouteAttemptTrainset);
                 _status = ComputeStatus.Error;
                 yield break;
             }
@@ -348,10 +350,16 @@ namespace RevisedDVRoute.CommsRadio
 
                 if (Module.ActiveRoute.Route.Reverses.Count > 0)
                     _resultMessage += $"\nReverses: {Module.ActiveRoute.Route.Reverses.Count}";
+
+                _resultMessage = Compatibility.ADSCompatibility.AppendRouteWarningNotice(
+                    _resultMessage, RouteCommand.LastRouteAttemptTrainset);
+                if (!string.IsNullOrWhiteSpace(RouteCommand.LastADSAlternativeNotice))
+                    _resultMessage += "\n" + RouteCommand.LastADSAlternativeNotice;
             }
             else
             {
-                _resultMessage = "Route not found";
+                _resultMessage = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    "Route not found", RouteCommand.LastRouteAttemptTrainset);
                 _status = ComputeStatus.Error;
                 yield break;
             }
@@ -506,11 +514,14 @@ namespace RevisedDVRoute.CommsRadio
                 yield break;
             }
 
+            Trainset attemptedTrainset = Module.ActiveRoute.Route?.Trainset
+                ?? Module.ActiveRoute.RouteTracker?.Trainset;
             System.Threading.Tasks.Task<Route> task = null;
             try { task = Module.ActiveRoute.Route.FindOppositeRoute(); }
             catch (Exception e)
             {
-                _message = e.Message;
+                _message = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    e.Message, attemptedTrainset);
                 _status = FlipStatus.Error;
                 yield break;
             }
@@ -519,7 +530,9 @@ namespace RevisedDVRoute.CommsRadio
 
             if (task.IsFaulted || task.Result == null)
             {
-                _message = task.Exception?.InnerException?.Message ?? "No opposite route found";
+                _message = Compatibility.ADSCompatibility.AppendFailureNotice(
+                    task.Exception?.InnerException?.Message ?? "No opposite route found",
+                    attemptedTrainset);
                 _status = FlipStatus.Error;
                 yield break;
             }
@@ -540,6 +553,10 @@ namespace RevisedDVRoute.CommsRadio
             newRoute.AdjustSwitches();
 
             _message = $"Flipped {(newRoute.Length / 1000.0):0.#}km\nHeading: {newRoute.StartHeading}";
+            _message = Compatibility.ADSCompatibility.AppendRouteWarningNotice(
+                _message, trainset);
+            if (!string.IsNullOrWhiteSpace(RouteCommand.LastADSAlternativeNotice))
+                _message += "\n" + RouteCommand.LastADSAlternativeNotice;
             _status = FlipStatus.Done;
         }
 

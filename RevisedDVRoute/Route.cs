@@ -190,6 +190,112 @@ namespace RevisedDVRoute
             AdjustSwitches(false);
         }
 
+        /// <summary>
+        /// Re-aligns switches which are still ahead of the train.  A route is
+        /// normally aligned when it is created, but another train (or a manual
+        /// switch) can change a junction afterwards.  Only future path
+        /// transitions are considered so a switch behind the train is never
+        /// changed while the consist may still be clearing it.
+        /// </summary>
+        internal void AdjustSwitchesAhead(int currentPathIndex, double currentPosition)
+        {
+            if (currentPathIndex < 0)
+                return;
+
+            WalkPath((walkData) =>
+            {
+                if (walkData.pathIndex < currentPathIndex)
+                    return true;
+
+                if (walkData.nextTrack == null)
+                    return false;
+
+                double transitionPosition = walkData.distanceFromStart
+                    + walkData.currentTrack.LogicTrack().length;
+
+                // The junction is already behind the leading end of the
+                // consist.  Do not change it even if another train has since
+                // left it in a different position.
+                if (transitionPosition < currentPosition - 1.0)
+                    return true;
+
+                Junction junction = GetJunctionBetween(walkData.currentTrack, walkData.nextTrack);
+                if (junction != null && junction.IsFree())
+                    SwitchJunctionIfNeeded(walkData.currentTrack, walkData.nextTrack, junction);
+
+                return true;
+            });
+        }
+
+        /// <summary>
+        /// Returns whether the selected junctions currently allow the route's
+        /// next transition.  This is also used after a live switch correction
+        /// so the tracker does not briefly report WrongHeading from a stale
+        /// cached track-next value.
+        /// </summary>
+        internal bool IsTransitionAligned(WalkPathData walkData)
+        {
+            if (walkData == null || walkData.currentTrack == null || walkData.nextTrack == null)
+                return true;
+
+            Junction junction = GetJunctionBetween(walkData.currentTrack, walkData.nextTrack);
+            if (junction != null)
+            {
+                if (junction.inBranch == null || junction.outBranches == null)
+                    return false;
+
+                if (junction.selectedBranch < 0 || junction.selectedBranch >= junction.outBranches.Count)
+                    return false;
+
+                RailTrack selectedTrack = junction.outBranches[junction.selectedBranch].track;
+                if (junction.inBranch.track == walkData.currentTrack)
+                    return selectedTrack == walkData.nextTrack;
+
+                if (junction.inBranch.track == walkData.nextTrack)
+                    return selectedTrack == walkData.currentTrack;
+
+                return false;
+            }
+
+            if (walkData.prevTrack != null)
+            {
+                RailTrack selectedNext = walkData.currentTrack.GetNextFromPrev(walkData.prevTrack);
+                if (selectedNext != null)
+                    return selectedNext == walkData.nextTrack;
+            }
+
+            return walkData.currentTrack.GetOutTrack() == walkData.nextTrack
+                || walkData.currentTrack.GetInTrack() == walkData.nextTrack;
+        }
+
+        private static Junction GetJunctionBetween(RailTrack currentTrack, RailTrack nextTrack)
+        {
+            Junction[] candidates =
+            {
+                currentTrack?.inJunction,
+                currentTrack?.outJunction,
+                nextTrack?.inJunction,
+                nextTrack?.outJunction
+            };
+
+            foreach (Junction junction in candidates)
+            {
+                if (junction == null || junction.inBranch == null || junction.outBranches == null)
+                    continue;
+
+                bool currentIsInBranch = junction.inBranch.track == currentTrack;
+                bool nextIsInBranch = junction.inBranch.track == nextTrack;
+                bool currentIsOutBranch = junction.outBranches.Any(branch => branch.track == currentTrack);
+                bool nextIsOutBranch = junction.outBranches.Any(branch => branch.track == nextTrack);
+
+                if ((currentIsInBranch && nextIsOutBranch)
+                    || (nextIsInBranch && currentIsOutBranch))
+                    return junction;
+            }
+
+            return null;
+        }
+
         private void AdjustSwitches(bool beginSignalReservation)
         {
             int count = 0;
@@ -294,6 +400,14 @@ namespace RevisedDVRoute
                     return false;
                 }
 
+                string adsRouteOwner;
+                if (!Compatibility.ADSCompatibility.CanSwitchJunction(
+                    junction, branchIndex, out adsRouteOwner))
+                {
+                    Compatibility.ADSCompatibility.LogBlockedJunctionSwitch(junction, adsRouteOwner);
+                    return false;
+                }
+
                 Terminal.Log($"Switch {track.LogicTrack().ID.FullID} -> {trackToSwitch.LogicTrack().ID.FullID}");
                 junction.Switch(Junction.SwitchMode.NO_SOUND);
                 return true;
@@ -376,7 +490,8 @@ namespace RevisedDVRoute
 
             try
             {
-                return await Route.FindRoute(FirstTrack.LogicTrack(), LastTrack.LogicTrack(),
+                return await RouteCommand.FindRouteWithADSAlternative(
+                    FirstTrack.LogicTrack(), LastTrack.LogicTrack(),
                     Module.settings.ReversingStrategy, Trainset, trackTransitions);
             }
             catch (CommandException exception)
@@ -384,23 +499,30 @@ namespace RevisedDVRoute
                 Module.mod?.Logger.Log("Opposite-heading route unavailable in the loaded track layout: "
                     + startId + " -> " + destinationId + "; excluded " + excludedNextId
                     + "; planner result: " + exception.Message + ".");
+
+                if (exception.Message.StartsWith("ADS ", StringComparison.OrdinalIgnoreCase))
+                    throw;
+
                 throw new CommandException("No opposite-heading path in loaded layout");
             }
         }
 
-        public async static Task<Route> FindRoute(Track begin, Track end, ReversingStrategy reversingStrategy, Trainset trainset, List<TrackTransition> trackTransitions = null)
+        public async static Task<Route> FindRoute(Track begin, Track end, ReversingStrategy reversingStrategy,
+            Trainset trainset, List<TrackTransition> trackTransitions = null,
+            ISet<RailTrack> excludedTracks = null)
         {
             if (begin.ID.FullID == end.ID.FullID)
                 throw new CommandException("You're already there");
 
-            Route route = await FindRoute(begin, end, trainset, false, trackTransitions);
+            Route route = await FindRoute(begin, end, trainset, false, trackTransitions, excludedTracks);
 
             if (reversingStrategy != ReversingStrategy.NoReversing && (route == null || reversingStrategy == ReversingStrategy.ChooseBest))
             {
 #if DEBUG
                 Terminal.Log($"Trying path with allowed reversing");
 #endif
-                var routeWithReversing = await FindRoute(begin, end, trainset, true, trackTransitions);
+                var routeWithReversing = await FindRoute(begin, end, trainset, true, trackTransitions,
+                    excludedTracks);
 
                 if (routeWithReversing != null)
                 {
@@ -420,7 +542,9 @@ namespace RevisedDVRoute
             return route;
         }
 
-        private async static Task<Route> FindRoute(Track begin, Track end, Trainset trainset, bool allowReverses, List<TrackTransition> trackTransitions = null)
+        private async static Task<Route> FindRoute(Track begin, Track end, Trainset trainset,
+            bool allowReverses, List<TrackTransition> trackTransitions = null,
+            ISet<RailTrack> excludedTracks = null)
         {
             PathFinder pathFinder = new PathFinder(begin, end);
 
@@ -432,7 +556,7 @@ namespace RevisedDVRoute
             }
 
             var path = await pathFinder.FindPath(
-                allowReverses, consistLength, trackTransitions, trainset);
+                allowReverses, consistLength, trackTransitions, trainset, excludedTracks);
 
             if (path == null || path.Count == 0)
                 return null;

@@ -24,6 +24,9 @@ namespace RevisedDVRoute
 
     public static class RouteCommand
     {
+        public static Trainset LastRouteAttemptTrainset { get; private set; }
+        public static string LastADSAlternativeNotice { get; private set; }
+
         public static async void DoTerminalCommand(CommandArg[] args)
         {
             try
@@ -42,11 +45,18 @@ namespace RevisedDVRoute
                     }
 
                     await DoCommand(args);
+                    if (!string.IsNullOrWhiteSpace(LastADSAlternativeNotice))
+                    {
+                        string adsResult = Compatibility.ADSCompatibility.AppendRouteWarningNotice(
+                            "ADS route check", LastRouteAttemptTrainset);
+                        Terminal.Log(adsResult + "\n" + LastADSAlternativeNotice);
+                    }
                 }
             }
             catch (CommandException exc)
             {
-                Terminal.Log(exc.Message);
+                Terminal.Log(Compatibility.ADSCompatibility.AppendFailureNotice(
+                    exc.Message, LastRouteAttemptTrainset));
             }
             catch (Exception exc)
             {
@@ -55,6 +65,7 @@ namespace RevisedDVRoute
         }
         public async static System.Threading.Tasks.Task DoCommand(CommandArg[] args)
         {
+            ResetRouteAttempt(null);
             if(args.Length == 0)
             {
                 throw new CommandException("No command args");
@@ -118,6 +129,8 @@ namespace RevisedDVRoute
                     trainCar = routeTracker.CurrentTask.TrainSets.FirstOrDefault()?.firstCar;
                 }
 
+                LastRouteAttemptTrainset = trainCar?.trainset;
+
                 if (routeTracker.CurrentTask == null)
                 {
                     throw new CommandException("No suitable task");
@@ -140,6 +153,8 @@ namespace RevisedDVRoute
                 {
                     throw new CommandException("No last loco");
                 }
+
+                LastRouteAttemptTrainset = trainCar.trainset;
 
                 if (Module.ActiveRoute.RouteTracker.CurrentTask == null)
                 {
@@ -182,6 +197,8 @@ namespace RevisedDVRoute
                     //TODO
                 }
 
+                LastRouteAttemptTrainset = trainset;
+
                 if (trainset == null)
                 {
                     throw new CommandException("Goal track must be associated with car");
@@ -212,6 +229,9 @@ namespace RevisedDVRoute
                 {
                     throw new CommandException("No route active");
                 }
+
+                LastRouteAttemptTrainset = Module.ActiveRoute.RouteTracker?.Trainset
+                    ?? Module.ActiveRoute.Route?.Trainset;
 
 
                 var route = await Module.ActiveRoute.Route.FindOppositeRoute();
@@ -305,6 +325,8 @@ namespace RevisedDVRoute
                     throw new CommandException("No last loco");
                 }
 
+                LastRouteAttemptTrainset = trainCar.trainset;
+
                 if(args[1].String == "stop")
                 {
                     var locoAI = Module.GetLocoAI(trainCar);
@@ -321,12 +343,16 @@ namespace RevisedDVRoute
                 Track startTrack = trainCar.trainset.firstCar.Bogies[0].track.LogicTrack();
                 Track destTrack = goalTrack.LogicTrack();
 
-                var route = await Route.FindRoute(startTrack, destTrack, ReversingStrategy.ChooseBest, trainCar.trainset);
-
-                if (route == null)
+                Route route;
+                try
+                {
+                    route = await FindRouteWithADSAlternative(startTrack, destTrack,
+                        ReversingStrategy.ChooseBest, trainCar.trainset);
+                }
+                catch
                 {
                     Module.ActiveRoute.ClearRoute();
-                    throw new CommandException("Path cannot be found");
+                    throw;
                 }
 
                 Module.ActiveRoute.Route = route;
@@ -359,17 +385,136 @@ namespace RevisedDVRoute
                 throw new CommandException("Empty end");
             }
 
-            var route = await Route.FindRoute(begin, end, reversingStrategy, trainset);
-            if (route == null)
+            Route route;
+            try
+            {
+                route = await FindRouteWithADSAlternative(begin, end, reversingStrategy, trainset);
+            }
+            catch
             {
                 Module.ActiveRoute.ClearRoute();
-                throw new CommandException("Path cannot be found");
+                throw;
             }
-            else
+
+            Module.ActiveRoute.Route = route;
+            route.AdjustSwitches();
+        }
+
+        internal async static Task<Route> FindRouteWithADSAlternative(Track begin, Track end,
+            ReversingStrategy reversingStrategy, Trainset trainset,
+            List<TrackTransition> trackTransitions = null)
+        {
+            ResetRouteAttempt(trainset);
+
+            // A replacement route must not treat this mod's previous rolling
+            // DV Signals reservation as a foreign ADS signal conflict.
+            Route previousActiveRoute = Module.ActiveRoute?.Route;
+            Compatibility.DVSignalsCompatibility.ClearPlayerRouteReservation();
+
+            try
             {
-                Module.ActiveRoute.Route = route;
-                route.AdjustSwitches();
+                return await FindRouteWithADSAlternativeCore(begin, end, reversingStrategy,
+                    trainset, trackTransitions);
             }
+            catch
+            {
+                // A failed flip keeps the previous route active. Restore its
+                // rolling reservation; callers which abandon it will clear it
+                // through ActiveRoute immediately after this task faults.
+                if (previousActiveRoute != null
+                    && Module.ActiveRoute != null
+                    && Module.ActiveRoute.Route == previousActiveRoute)
+                {
+                    Compatibility.DVSignalsCompatibility.BeginPlayerRouteReservation(
+                        previousActiveRoute);
+                }
+                throw;
+            }
+        }
+
+        private async static Task<Route> FindRouteWithADSAlternativeCore(Track begin, Track end,
+            ReversingStrategy reversingStrategy, Trainset trainset,
+            List<TrackTransition> trackTransitions)
+        {
+            Route route = await Route.FindRoute(begin, end, reversingStrategy, trainset,
+                trackTransitions);
+            if (route == null)
+                throw new CommandException("Path cannot be found");
+
+            HashSet<RailTrack> blockingTracks;
+            if (!Compatibility.ADSCompatibility.TryGetBlockingTracks(trainset, route.Path,
+                out blockingTracks))
+            {
+                if (Compatibility.ADSCompatibility.LastRouteRejected)
+                    throw new CommandException(
+                        "ADS blocked the original route; no different route can avoid the conflict");
+                return route;
+            }
+
+            string blockedNames = string.Join(", ", blockingTracks
+                .Select(track => track?.LogicTrack()?.ID?.FullID)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Take(4)
+                .ToArray());
+            Module.mod?.Logger.Log("ADS reported blocking conflicts on the calculated route; "
+                + "searching once more with " + blockingTracks.Count + " track(s) excluded"
+                + (string.IsNullOrWhiteSpace(blockedNames) ? "." : ": " + blockedNames + "."));
+
+            try
+            {
+                Route alternative = await Route.FindRoute(begin, end, reversingStrategy, trainset,
+                    trackTransitions, blockingTracks);
+                if (alternative == null)
+                    throw new CommandException("alternate path cannot be found");
+
+                if (route.Path.SequenceEqual(alternative.Path))
+                    throw new CommandException("alternate search returned the original route");
+
+                int divergenceIndex = FirstDivergenceIndex(route.Path, alternative.Path);
+                string divergenceTrack = divergenceIndex >= 0 && divergenceIndex < alternative.Path.Count
+                    ? alternative.Path[divergenceIndex]?.LogicTrack()?.ID?.FullID
+                    : null;
+                LastADSAlternativeNotice = "ADS ALTERNATE CONFIRMED: a different route was selected"
+                    + (string.IsNullOrWhiteSpace(divergenceTrack)
+                        ? ". "
+                        : " at " + divergenceTrack + ". ")
+                    + blockingTracks.Count + " blocked original-route track"
+                    + (blockingTracks.Count == 1 ? " avoided." : "s avoided.");
+                Module.mod?.Logger.Log("ADS alternate route confirmed: original tracks="
+                    + route.Path.Count + "; alternate tracks=" + alternative.Path.Count
+                    + "; first divergence index=" + divergenceIndex
+                    + (string.IsNullOrWhiteSpace(divergenceTrack)
+                        ? "."
+                        : "; alternate track=" + divergenceTrack + "."));
+                return alternative;
+            }
+            catch (CommandException exception)
+            {
+                Module.mod?.Logger.Log("ADS alternate-route search failed: " + exception.Message);
+                throw new CommandException(
+                    "ADS reported a blocked route; no alternate route was found");
+            }
+        }
+
+        private static void ResetRouteAttempt(Trainset trainset)
+        {
+            LastRouteAttemptTrainset = trainset;
+            LastADSAlternativeNotice = null;
+            Compatibility.ADSCompatibility.BeginRouteAttempt();
+        }
+
+        private static int FirstDivergenceIndex(IList<RailTrack> original, IList<RailTrack> alternative)
+        {
+            int commonLength = Math.Min(original?.Count ?? 0, alternative?.Count ?? 0);
+            for (int index = 0; index < commonLength; index++)
+            {
+                if (original[index] != alternative[index])
+                    return index;
+            }
+
+            return (original?.Count ?? 0) == (alternative?.Count ?? 0)
+                ? -1
+                : commonLength;
         }
 
     }

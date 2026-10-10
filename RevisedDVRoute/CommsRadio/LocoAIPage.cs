@@ -47,7 +47,12 @@ namespace RevisedDVRoute.CommsRadio
                 {
                     await RouteCommand.DoCommand(args);
 
-                    DisplayText($"AI driving to\n{trackPage.SelectedTrack}", "");
+                    string result = $"AI driving to\n{trackPage.SelectedTrack}";
+                    result = Compatibility.ADSCompatibility.AppendRouteWarningNotice(result,
+                        RouteCommand.LastRouteAttemptTrainset);
+                    if (!string.IsNullOrWhiteSpace(RouteCommand.LastADSAlternativeNotice))
+                        result += "\n" + RouteCommand.LastADSAlternativeNotice;
+                    DisplayText(result, "");
 
                     await new WaitForSeconds(1.0f);
 
@@ -55,7 +60,9 @@ namespace RevisedDVRoute.CommsRadio
                 }
                 catch (CommandException exc)
                 {
-                    RedirectToMessagePage(exc.Message, "MENU");
+                    string failure = Compatibility.ADSCompatibility.AppendFailureNotice(exc.Message,
+                        RouteCommand.LastRouteAttemptTrainset);
+                    RedirectToMessagePage(failure, "MENU");
                 }
                 catch (Exception exc)
                 {

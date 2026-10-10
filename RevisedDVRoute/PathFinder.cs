@@ -83,6 +83,7 @@ namespace RevisedDVRoute
         private int penalizedSignalReservedTracks;
         private int penalizedAITrafficReservedTracks;
         private int skippedUnsafeDoubleTrackSections;
+        private int skippedExcludedTracks;
         private int skippedOccupiedTracks;
         private int skippedBannedTransitions;
         private int skippedDirectionChanges;
@@ -203,7 +204,8 @@ namespace RevisedDVRoute
         /// <param name="carsToIgnore"></param>
         /// <param name="consistLength"></param>
         private async System.Threading.Tasks.Task<SearchState> Astar(bool allowReverse,
-            HashSet<string> carsToIgnore, double consistLength, List<TrackTransition> bannedTransitions)
+            HashSet<string> carsToIgnore, double consistLength, List<TrackTransition> bannedTransitions,
+            ISet<RailTrack> excludedTracks)
         {
             // Snapshot the yard organizer reference on the main thread before
             // going background. Its reservation dictionary changes only during
@@ -305,6 +307,13 @@ namespace RevisedDVRoute
                     Track neighborLogic = neighbor.LogicTrack();
                     if (neighborLogic == null)
                         continue;
+
+                    if (neighbor != start && neighbor != goal
+                        && excludedTracks != null && excludedTracks.Contains(neighbor))
+                    {
+                        skippedExcludedTracks++;
+                        continue;
+                    }
 
                     if (Compatibility.DoubleTrackCompatibility.IsUnsafeRouteSection(neighbor))
                     {
@@ -425,7 +434,8 @@ namespace RevisedDVRoute
 
         // Return a List of Locations representing the found path
         public async Task<List<RailTrack>> FindPath(bool allowReverse, double consistLength,
-            List<TrackTransition> bannedTransitions, Trainset trainset)
+            List<TrackTransition> bannedTransitions, Trainset trainset,
+            ISet<RailTrack> excludedTracks = null)
         {
             List<RailTrack> path = new List<RailTrack>();
 
@@ -446,6 +456,7 @@ namespace RevisedDVRoute
             penalizedSignalReservedTracks = 0;
             penalizedAITrafficReservedTracks = 0;
             skippedUnsafeDoubleTrackSections = 0;
+            skippedExcludedTracks = 0;
             skippedOccupiedTracks = 0;
             skippedBannedTransitions = 0;
             skippedDirectionChanges = 0;
@@ -456,6 +467,7 @@ namespace RevisedDVRoute
                 + "; DV Signals reserved tracks=" + Compatibility.DVSignalsCompatibility.ReservationCount
                 + "; AI Traffic reserved tracks=" + Compatibility.AITrafficCompatibility.ReservationCount
                 + "; DoubleTrack hazards blocked=" + Compatibility.DoubleTrackCompatibility.UnsafeSectionCount
+                + "; requested exclusions=" + (excludedTracks == null ? 0 : excludedTracks.Count)
                 + "; reversals=" + (allowReverse ? "allowed" : "not allowed") + ".");
 
             HashSet<string> carsToIgnore = new HashSet<string>();
@@ -470,7 +482,7 @@ namespace RevisedDVRoute
             }
 
             SearchState goalState = await Astar(
-                allowReverse, carsToIgnore, consistLength, bannedTransitions);
+                allowReverse, carsToIgnore, consistLength, bannedTransitions, excludedTracks);
 
             if (penalizedSignalReservedTracks > 0)
                 Terminal.Log("DV Signals: strongly discouraged " + penalizedSignalReservedTracks
@@ -484,6 +496,7 @@ namespace RevisedDVRoute
                 Module.mod?.Logger.Log("Route search failed: " + start.LogicTrack().ID.FullID
                     + " -> " + goal.LogicTrack().ID.FullID
                     + "; DoubleTrack hazard candidates=" + skippedUnsafeDoubleTrackSections
+                    + "; requested exclusions=" + skippedExcludedTracks
                     + "; occupied candidates=" + skippedOccupiedTracks
                     + "; excluded direction=" + skippedBannedTransitions
                     + "; reversal-required candidates=" + skippedDirectionChanges
@@ -512,6 +525,7 @@ namespace RevisedDVRoute
                 + " -> " + goal.LogicTrack().ID.FullID + "; tracks=" + path.Count
                 + "; initial next=" + (path.Count > 1 ? path[1].LogicTrack().ID.FullID : "none")
                 + "; DoubleTrack hazard candidates rejected=" + skippedUnsafeDoubleTrackSections
+                + "; requested exclusions rejected=" + skippedExcludedTracks
                 + "; DV Signals penalized candidates=" + penalizedSignalReservedTracks
                 + "; AI Traffic penalized candidates=" + penalizedAITrafficReservedTracks + ".");
 
