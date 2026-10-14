@@ -2,10 +2,10 @@
 
 Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations support DV Signals interlocking, AI Traffic right-of-way, and both DoubleTrack layouts.
 
-> **Version:** 1.0.1<br>
+> **Version:** 1.0.1a<br>
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete 1.0.1 update notes.
+See [CHANGELOG.md](CHANGELOG.md) for the complete update notes.
 
 ## Original author credit
 
@@ -170,7 +170,7 @@ Visual Studio 2022 (or MSBuild), the .NET Framework 4.8 Developer Pack, a Derail
 MSBuild RevisedDVRoute\RevisedDVRoute.csproj /t:Rebuild /p:Configuration=Release /p:DVInstallPath="C:\Steam\steamapps\common\Derail Valley"
 ```
 
-The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.1.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
+The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.1a.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
 
 For an isolated test build, select the **Test** solution configuration in Visual Studio/Rider or run:
 

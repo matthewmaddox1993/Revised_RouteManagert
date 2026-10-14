@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using CommsRadioAPI;
 using DV;
 using DV.Logic.Job;
@@ -521,7 +521,8 @@ namespace RevisedDVRoute
                 Compatibility.MphCompatibility.RefreshStatus();
                 Compatibility.DoubleTrackCompatibility.RefreshForCurrentLayout();
                 yield return new UnityEngine.WaitForSeconds(
-                    Compatibility.DoubleTrackCompatibility.HasLoadedLayout ? 5f : 0.5f);
+                    Compatibility.DoubleTrackCompatibility.IsActive
+                    && !Compatibility.DoubleTrackCompatibility.HasLoadedLayout ? 0.5f : 5f);
             }
         }
 

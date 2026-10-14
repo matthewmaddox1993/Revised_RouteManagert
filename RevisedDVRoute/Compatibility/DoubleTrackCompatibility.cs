@@ -33,23 +33,26 @@ namespace RevisedDVRoute.Compatibility
         {
             public static readonly LayoutSnapshot Empty = new LayoutSnapshot(LoadedMode.Unavailable,
                 new HashSet<RailTrack>(), new HashSet<RailTrack>(), new HashSet<RailTrack>(),
-                new Dictionary<RailTrack, bool>());
+                new Dictionary<RailTrack, bool>(), null);
 
             public readonly LoadedMode Mode;
             public readonly HashSet<RailTrack> DoubleTrackSections;
             public readonly HashSet<RailTrack> CrossoverSections;
             public readonly HashSet<RailTrack> UnsafeSections;
             public readonly Dictionary<RailTrack, bool> PreferredForward;
+            public readonly RailTrack SampleTrack;
 
             public LayoutSnapshot(LoadedMode mode, HashSet<RailTrack> doubleTrackSections,
                 HashSet<RailTrack> crossoverSections, HashSet<RailTrack> unsafeSections,
-                Dictionary<RailTrack, bool> preferredForward)
+                Dictionary<RailTrack, bool> preferredForward, RailTrack sampleTrack = null)
             {
                 Mode = mode;
                 DoubleTrackSections = doubleTrackSections;
                 CrossoverSections = crossoverSections;
                 UnsafeSections = unsafeSections;
                 PreferredForward = preferredForward;
+                SampleTrack = sampleTrack ?? doubleTrackSections?.FirstOrDefault(t => t != null)
+                    ?? crossoverSections?.FirstOrDefault(t => t != null);
             }
         }
 
@@ -134,7 +137,30 @@ namespace RevisedDVRoute.Compatibility
             return track != null && currentLayout.UnsafeSections.Contains(track);
         }
 
-        public static void RefreshForCurrentLayout()
+        internal static bool IsLayoutValid()
+        {
+            LayoutSnapshot layout = currentLayout;
+            if (layout == null || layout.Mode == LoadedMode.Unavailable)
+                return false;
+
+            if (layout.SampleTrack == null)
+                return false;
+
+            try
+            {
+                var reg = RailTrackRegistryBase.RailTracks;
+                if (reg == null || reg.Length == 0)
+                    return false;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        public static void RefreshForCurrentLayout(bool force = false)
         {
             LoadedMode mode = GetLoadedMode();
             LoadedMode selectedMode = GetSelectedMode();
@@ -144,7 +170,12 @@ namespace RevisedDVRoute.Compatibility
                 return;
             }
 
-            RailTrack[] tracks = UnityEngine.Object.FindObjectsOfType<RailTrack>();
+            if (!force && HasLoadedLayout && currentLayout.Mode == mode && IsLayoutValid())
+            {
+                LogPendingModeChange(mode, selectedMode);
+                return;
+            }
+
             RailTrack[] registeredTracks;
             try
             {
@@ -155,12 +186,19 @@ namespace RevisedDVRoute.Compatibility
                     .Where(track => track != null)
                     .ToArray() ?? new RailTrack[0];
             }
-            catch (NullReferenceException)
+            catch (Exception)
             {
                 currentLayout = LayoutSnapshot.Empty;
                 return;
             }
 
+            if (registeredTracks.Length == 0)
+            {
+                currentLayout = LayoutSnapshot.Empty;
+                return;
+            }
+
+            RailTrack[] tracks = UnityEngine.Object.FindObjectsOfType<RailTrack>();
             var doubleTrackSections = new HashSet<RailTrack>();
             var crossoverSections = new HashSet<RailTrack>();
             var candidates = new List<RailTrack>();
@@ -233,31 +271,93 @@ namespace RevisedDVRoute.Compatibility
             }
         }
 
+        private struct CandidateInfo
+        {
+            public RailTrack Track;
+            public Vector3 Mid;
+            public Vector3 Tangent;
+        }
+
         private static Dictionary<RailTrack, bool> BuildPreferredDirections(List<RailTrack> candidates)
         {
             var preferredForward = new Dictionary<RailTrack, bool>();
+            if (candidates == null || candidates.Count == 0)
+                return preferredForward;
+
+            var info = new List<CandidateInfo>(candidates.Count);
             for (int i = 0; i < candidates.Count; i++)
             {
-                RailTrack first = candidates[i];
-                Vector3 firstMid = first.curve.GetPointAt(0.5f);
-                Vector3 firstTangent = Horizontal(first.curve.GetTangentAt(0.5f));
-                for (int j = i + 1; j < candidates.Count; j++)
+                RailTrack track = candidates[i];
+                if (track != null && track.curve != null)
                 {
-                    RailTrack second = candidates[j];
-                    Vector3 secondMid = second.curve.GetPointAt(0.5f);
-                    float separation = Vector3.Distance(firstMid, secondMid);
-                    if (separation < 2.5f || separation > 12f)
-                        continue;
+                    info.Add(new CandidateInfo
+                    {
+                        Track = track,
+                        Mid = track.curve.GetPointAt(0.5f),
+                        Tangent = Horizontal(track.curve.GetTangentAt(0.5f))
+                    });
+                }
+            }
 
-                    float alignment = Vector3.Dot(firstTangent, Horizontal(second.curve.GetTangentAt(0.5f)));
-                    if (Mathf.Abs(alignment) < 0.85f)
-                        continue;
+            const float cellSize = 25f;
+            var grid = new Dictionary<long, List<int>>();
+            for (int i = 0; i < info.Count; i++)
+            {
+                Vector3 mid = info[i].Mid;
+                int cx = Mathf.FloorToInt(mid.x / cellSize);
+                int cz = Mathf.FloorToInt(mid.z / cellSize);
+                long key = ((long)cx << 32) | (uint)cz;
+                List<int> cell;
+                if (!grid.TryGetValue(key, out cell))
+                {
+                    cell = new List<int>();
+                    grid[key] = cell;
+                }
+                cell.Add(i);
+            }
 
-                    Vector3 right = Vector3.Cross(Vector3.up, firstTangent).normalized;
-                    bool secondIsRight = Vector3.Dot(secondMid - firstMid, right) > 0f;
-                    preferredForward[first] = !secondIsRight;
-                    preferredForward[second] = secondIsRight ? alignment > 0f : alignment <= 0f;
-                    break;
+            for (int i = 0; i < info.Count; i++)
+            {
+                CandidateInfo first = info[i];
+                if (preferredForward.ContainsKey(first.Track))
+                    continue;
+
+                int cx = Mathf.FloorToInt(first.Mid.x / cellSize);
+                int cz = Mathf.FloorToInt(first.Mid.z / cellSize);
+
+                bool matched = false;
+                for (int dx = -1; dx <= 1 && !matched; dx++)
+                {
+                    for (int dz = -1; dz <= 1 && !matched; dz++)
+                    {
+                        long key = ((long)(cx + dx) << 32) | (uint)(cz + dz);
+                        List<int> cell;
+                        if (!grid.TryGetValue(key, out cell))
+                            continue;
+
+                        for (int k = 0; k < cell.Count; k++)
+                        {
+                            int j = cell[k];
+                            if (j <= i)
+                                continue;
+
+                            CandidateInfo second = info[j];
+                            float separation = Vector3.Distance(first.Mid, second.Mid);
+                            if (separation < 2.5f || separation > 12f)
+                                continue;
+
+                            float alignment = Vector3.Dot(first.Tangent, second.Tangent);
+                            if (Mathf.Abs(alignment) < 0.85f)
+                                continue;
+
+                            Vector3 right = Vector3.Cross(Vector3.up, first.Tangent).normalized;
+                            bool secondIsRight = Vector3.Dot(second.Mid - first.Mid, right) > 0f;
+                            preferredForward[first.Track] = !secondIsRight;
+                            preferredForward[second.Track] = secondIsRight ? alignment > 0f : alignment <= 0f;
+                            matched = true;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -344,7 +444,7 @@ namespace RevisedDVRoute.Compatibility
             }
         }
 
-        private static bool IsActive
+        internal static bool IsActive
         {
             get
             {

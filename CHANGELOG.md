@@ -2,6 +2,14 @@
 
 All notable changes to Revised DV Route are recorded here.
 
+## 1.0.1a - 2026-10-14
+
+### Hotfix
+
+- Stopped rebuilding the complete DoubleTrack layout cache every five seconds when the loaded layout has not changed.
+- Reduced the one-time DoubleTrack lane-pairing scan by grouping nearby track sections spatially.
+- Kept fast layout-reload detection so the cache is rebuilt when the world or selected DoubleTrack mode changes.
+
 ## 1.0.1 - 2026-10-10
 
 ### ADS-aware alternate routing
