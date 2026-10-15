@@ -228,6 +228,7 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <Content Include="Repository.json" />
     <Content Include="Resources\audio\*.wav">
       <TargetPath>audio\%(Filename)%(Extension)</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
