@@ -20,8 +20,10 @@ All notable changes to Revised DV Route are recorded here.
 - Selected the required reverser direction from the route's first transition, including routes which genuinely require backing out.
 - Changed the AI departure sequence to close the throttle, stop and secure the train if necessary, select the exact numeric reverser position, and only then release the brakes.
 - Replaced repeated blind reverser inputs with verified movement to the requested reverser position.
-- Added a one-reversal-per-manoeuvre latch so `WrongHeading` or `ReverseTrain` cannot cycle the reverser between forward and reverse while the locomotive is stopped.
-- Allowed the train to move after a reversal so RouteTracker can confirm the new heading before another reversal is permitted.
+- Restricted reverser changes to explicit `ReverseTrain` manoeuvres; a gravity-induced `WrongHeading` state now arrests rollback and reapplies power in the already selected direction instead of flipping ends.
+- Added a one-reversal-per-manoeuvre latch and only re-arm it after confirmed movement in the selected direction, so downhill rollback cannot cycle the reverser between forward and reverse.
+- Measured AI control speed in the selected reverser direction so backward acceleration no longer looks like successful forward acceleration and suppresses traction.
+- Added low-speed power headroom for stalled trains on steep grades while retaining throttle ramping, sanding, amperage, wheel-slip, and thermal protections.
 
 ### Signal stability
 

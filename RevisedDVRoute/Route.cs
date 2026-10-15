@@ -423,6 +423,10 @@ namespace RevisedDVRoute
 
             if (branchIndex != -1 && branchIndex != junction.selectedBranch)
             {
+                Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
+                if (Compatibility.AITrafficCompatibility.IsJunctionReserved(junction, out _))
+                    return false;
+
                 string reservationOwner;
                 if (!Compatibility.DVSignalsCompatibility.CanSwitchJunction(junction, out reservationOwner))
                 {

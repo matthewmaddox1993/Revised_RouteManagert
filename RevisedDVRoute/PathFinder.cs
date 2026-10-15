@@ -78,11 +78,10 @@ namespace RevisedDVRoute
 
     public class PathFinder
     {
-        // Extra cost per track reserved by DV Signals or AI Traffic. Edge cost
-        // is length / average speed, so this equals a modest detour (a few
-        // kilometres at most per reserved track) instead of forbidding the
-        // direct route outright.
-        private const double ReservedTrackPenalty = 40.0;
+        // Strongly prefer a clear route when DV Signals or AI Traffic has
+        // reserved a track, while retaining it as a fallback for single-line
+        // corridors where every route shares the reservation.
+        private const double ReservedTrackPenalty = 5000.0;
 
         private RailTrack start;
         private RailTrack goal;
@@ -129,13 +128,6 @@ namespace RevisedDVRoute
             Terminal.Log($"TurntableCache: {_turntableTrackToTRT.Count} turntables, {_spurToTurntable.Count} spurs");
         }
         // ─────────────────────────────────────────────────────────────────────
-
-        // Heuristic that computes approximate distance between two rails
-        protected double Heuristic(RailTrack a, RailTrack b)
-        {
-            return (a.transform.position - b.transform.position).sqrMagnitude; //we dont need exact distance because that result is used only as a priority
-        }
-
 
         public PathFinder(Track start, Track goal)
         {
@@ -213,12 +205,10 @@ namespace RevisedDVRoute
             HashSet<string> carsToIgnore, double consistLength, List<TrackTransition> bannedTransitions,
             ISet<RailTrack> excludedTracks)
         {
-            // Snapshot the yard organizer reference on the main thread before
-            // going background. Its reservation dictionary changes only during
-            // main-thread job generation.
+            // RailTrack, Track, Junction and Unity transform APIs are not
+            // thread-safe. Keep all graph traversal on Unity's thread and yield
+            // periodically so large route searches do not freeze a frame.
             YardTracksOrganizer yardOrganizer = UnityEngine.Object.FindObjectOfType<YardTracksOrganizer>();
-
-            await Await.BackgroundSyncContext();
 
             cameFrom = new Dictionary<SearchState, SearchState>();
             costSoFar = new Dictionary<SearchState, double>();
@@ -230,7 +220,7 @@ namespace RevisedDVRoute
             queue.Enqueue(new RailTrackNode(startState, 0.0), 0.0);
 
             SearchState bestGoal = null;
-            double bestGoalCost = double.MaxValue;
+            int processedStates = 0;
 
             while (queue.Count > 0)
             {
@@ -247,16 +237,17 @@ namespace RevisedDVRoute
                 RailTrack prev = currentState.Previous;
                 if (current == goal)
                 {
-                    if (currentCost < bestGoalCost)
-                    {
-                        bestGoal = currentState;
-                        bestGoalCost = currentCost;
-                    }
-                    continue;
+                    bestGoal = currentState;
+                    break;
                 }
 
-                if (currentCost >= bestGoalCost)
-                    continue;
+                // Search costs are non-negative, so Dijkstra's queue order
+                // guarantees the first goal dequeued is the cheapest route.
+                // Yield only after complete state expansion; all game-object
+                // reads above and below remain on Unity's main thread.
+                processedStates++;
+                if ((processedStates & 127) == 0)
+                    await Await.NextUpdate();
 
                 List<RailTrack> neighbors = new List<RailTrack>();
                 HashSet<RailTrack> turntableDirect = new HashSet<RailTrack>();
@@ -363,10 +354,22 @@ namespace RevisedDVRoute
                         continue;
                     }
 
-                    double edgeCost = neighborLogic.length / neighbor.GetAverageSpeed();
+                    double averageSpeed = neighbor.GetAverageSpeed();
+                    if (double.IsNaN(averageSpeed) || double.IsInfinity(averageSpeed)
+                        || averageSpeed <= 0.0)
+                        averageSpeed = 40.0;
+
+                    double trackLength = neighborLogic.length;
+                    if (double.IsNaN(trackLength) || double.IsInfinity(trackLength)
+                        || trackLength < 0.0)
+                        continue;
+
+                    double edgeCost = trackLength / averageSpeed;
                     edgeCost = Compatibility.DoubleTrackCompatibility.AdjustRouteCost(
                         prev, current, neighbor, edgeCost);
                     double newCost = currentCost + edgeCost;
+                    if (double.IsNaN(newCost) || double.IsInfinity(newCost))
+                        continue;
 
                     // The two mods can describe the same protected section.
                     // Apply one penalty while retaining separate diagnostics.
@@ -390,13 +393,19 @@ namespace RevisedDVRoute
                     {
                         costSoFar[neighborState] = newCost;
                         cameFrom[neighborState] = currentState;
-                        double priority = newCost + Heuristic(neighbor, goal) / 20.0f;
+                        // Use Dijkstra ordering: route costs include dynamic
+                        // penalties and the geometric heuristic is not an
+                        // admissible lower bound on those costs.
+                        double priority = newCost;
+                        if (queue.Count >= queue.MaxSize)
+                            queue.Resize(queue.MaxSize <= int.MaxValue / 2
+                                ? queue.MaxSize * 2
+                                : int.MaxValue);
                         queue.Enqueue(new RailTrackNode(neighborState, newCost), priority);
                     }
                 }
             }
 
-            await Await.UnitySyncContext();
             return bestGoal;
         }
 
@@ -458,10 +467,10 @@ namespace RevisedDVRoute
             // modes. Snapshot the layout that is actually loaded before A*.
             Compatibility.DoubleTrackCompatibility.RefreshForCurrentLayout();
 
-            // The DV Signals API is Unity-thread-only.  The compatibility
-            // layer snapshots its reservations here for the A* worker to read.
+            // Optional-mod APIs are Unity-thread-only. Snapshot reservations
+            // before the frame-yielding search reads them.
             Compatibility.DVSignalsCompatibility.RefreshReservationSnapshot();
-            Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
+            Compatibility.AITrafficCompatibility.RefreshReservationSnapshot(true);
             penalizedSignalReservedTracks = 0;
             penalizedAITrafficReservedTracks = 0;
             skippedUnsafeDoubleTrackSections = 0;

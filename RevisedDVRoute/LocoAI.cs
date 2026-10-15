@@ -44,6 +44,7 @@ namespace RevisedDVRoute
         private int _freightHaulGeneration;
         private HaulState _freightHaulState = HaulState.Idle;
         private string _freightHaulError = null;
+        private readonly HashSet<Trainset> _intendedApproachTrainsets = new HashSet<Trainset>();
 
         public bool IsFreightHaulActive => _freightHaulActive;
         public HaulState FreightHaulState => _freightHaulState;
@@ -332,6 +333,78 @@ namespace RevisedDVRoute
             return minLimit;
         }
 
+        private bool IsTrackOccupiedByUnrelatedTrain(Track track, HashSet<string> ownCarIds)
+        {
+            if (track == null)
+                return false;
+
+            var destinationTrainsets = _intendedApproachTrainsets;
+            var currentTaskTrainsets = RouteTracker?.CurrentTask?.TrainSets;
+
+            foreach (var logicCar in track.GetCarsPartiallyOnTrack())
+            {
+                if (logicCar == null || ownCarIds.Contains(logicCar.ID))
+                    continue;
+
+                TrainCar occupiedCar;
+                if (TrainCarRegistry.Instance.logicCarToTrainCar.TryGetValue(logicCar, out occupiedCar)
+                    && occupiedCar?.trainset != null
+                    && (destinationTrainsets.Contains(occupiedCar.trainset)
+                        || (currentTaskTrainsets != null
+                            && currentTaskTrainsets.Contains(occupiedCar.trainset))))
+                {
+                    // A task may intentionally route to a train that must be
+                    // coupled. Other trains on the same track remain blockers.
+                    continue;
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private float GetCurrentTrackObstacleDistance(RailTrack track, double currentSpan,
+            float direction, Trainset ownTrainset, HashSet<string> ownCarIds)
+        {
+            if (track == null)
+                return float.PositiveInfinity;
+
+            // DV Signals can run without AI Traffic. Use the game's live
+            // bogie positions so an unrelated train on the current track is
+            // stopped for only when it is actually ahead, not behind us.
+            RailTrackBogiesOnTrack bogies = track.GetComponent<RailTrackBogiesOnTrack>();
+            if (bogies == null || bogies.bogiesOnTrack == null)
+                return IsTrackOccupiedByUnrelatedTrain(track.LogicTrack(), ownCarIds)
+                    ? 0f : float.PositiveInfinity;
+
+            float nearest = float.PositiveInfinity;
+            foreach (Bogie bogie in bogies.bogiesOnTrack)
+            {
+                TrainCar car = bogie?.Car;
+                if (car == null || car.trainset == ownTrainset)
+                    continue;
+
+                // The freight-haul coupling approach intentionally closes
+                // the last few metres to the selected stationary consist.
+                if (car.trainset != null
+                    && (_intendedApproachTrainsets.Contains(car.trainset)
+                        || (RouteTracker?.CurrentTask?.TrainSets != null
+                            && RouteTracker.CurrentTask.TrainSets.Contains(car.trainset))))
+                    continue;
+
+                if (bogie.traveller == null)
+                    continue;
+                float distance = (float)(direction >= 0f
+                    ? bogie.traveller.Span - currentSpan
+                    : currentSpan - bogie.traveller.Span);
+                if (distance >= 0f && distance < nearest)
+                    nearest = distance;
+            }
+
+            return nearest;
+        }
+
         /// <summary>
         /// Returns a braking-envelope speed for the current position.
         /// Constrained by:
@@ -351,20 +424,17 @@ namespace RevisedDVRoute
             IList<RailTrack> path = route?.Path;
             if (path == null || path.Count == 0)
             {
-                SignalHoldReason = null;
-                return target;
+                SignalHoldReason = "Route position unavailable; holding";
+                return 0f;
             }
 
             int pathIndex = RouteTracker.CurrentPathIndex;
-            if (pathIndex < 0 || pathIndex >= path.Count)
+            if (pathIndex < 0 || pathIndex >= path.Count
+                || RouteTracker.LeadingRailTrack == null
+                || path[pathIndex] != RouteTracker.LeadingRailTrack)
             {
-                RailTrack currentTrack = trainCar?.Bogies[0]?.track;
-                pathIndex = path.IndexOf(currentTrack);
-                if (pathIndex < 0)
-                {
-                    SignalHoldReason = null;
-                    return target;
-                }
+                SignalHoldReason = "Route position unavailable; holding";
+                return 0f;
             }
 
             target = Mathf.Min(target, GetTrackSpeedLimit(path[pathIndex]));
@@ -372,6 +442,87 @@ namespace RevisedDVRoute
             float currentSpeedMps = currentSpeedKph / 3.6f;
             Trainset trainset = RouteTracker?.Trainset ?? trainCar?.trainset;
             string activeHoldReason = null;
+            var ownCarIds = new HashSet<string>(trainset?.cars == null
+                ? Enumerable.Empty<string>()
+                : trainset.cars.Where(car => car?.logicCar != null).Select(car => car.logicCar.ID));
+
+            Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
+
+            // AI Traffic's reservation graph does not report the distance to
+            // a train already on our track, or a facing signal at STOP. Its
+            // SignalRegistry does both using live bogies and signal aspects.
+            var upcomingTracks = new List<RailTrack>();
+            for (int index = pathIndex + 1; index < path.Count; index++)
+                upcomingTracks.Add(path[index]);
+            if (!Compatibility.AITrafficCompatibility.TryGetHazardsAhead(
+                path[pathIndex], RouteTracker.LeadingTrackSpan,
+                RouteTracker.LeadingTrackDirection, upcomingTracks, trainset, trainCar,
+                out float obstacleDistance, out float stopSignalDistance))
+            {
+                SignalHoldReason = "AI Traffic signal/obstacle status unavailable; holding";
+                return 0f;
+            }
+
+            if (!Compatibility.DVSignalsCompatibility.TryGetStopSignalAhead(
+                path, pathIndex, RouteTracker.LeadingTrackSpan,
+                RouteTracker.LeadingTrackDirection, out float dvStopDistance))
+            {
+                SignalHoldReason = "DV Signals aspect status unavailable; holding";
+                return 0f;
+            }
+            stopSignalDistance = Mathf.Min(stopSignalDistance, dvStopDistance);
+
+            // AI Traffic's generic obstacle scan cannot distinguish the
+            // parked consist we were explicitly sent to couple to. During
+            // that approach our own scan and the per-track checks below still
+            // protect against every unrelated consist.
+            bool couplingTargetPresent = _intendedApproachTrainsets.Any(
+                candidate => candidate != null && candidate != trainset)
+                || (RouteTracker.CurrentTask?.TrainSets?.Any(
+                    candidate => candidate != null && candidate != trainset) ?? false);
+            if (couplingTargetPresent)
+                obstacleDistance = float.PositiveInfinity;
+
+            float localObstacleDistance = GetCurrentTrackObstacleDistance(
+                path[pathIndex], RouteTracker.LeadingTrackSpan,
+                RouteTracker.LeadingTrackDirection, trainset, ownCarIds);
+            float hazardDistance = Mathf.Min(Mathf.Min(obstacleDistance,
+                localObstacleDistance), stopSignalDistance);
+            if (!float.IsPositiveInfinity(hazardDistance))
+            {
+                float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
+                float stopDistance = Mathf.Max(0f,
+                    hazardDistance - responseDistance - 20f);
+                float stopTarget = Mathf.Sqrt(2f * SPEED_LIMIT_BRAKING_DECELERATION
+                    * stopDistance) * 3.6f;
+                if (hazardDistance < 20f || stopTarget < 3f)
+                    stopTarget = 0f;
+                if (stopTarget < target)
+                {
+                    target = stopTarget;
+                    activeHoldReason = stopSignalDistance <= obstacleDistance
+                        && stopSignalDistance <= localObstacleDistance
+                        ? "DV Signals STOP aspect ahead"
+                        : "Train ahead on route";
+                }
+            }
+
+            Track currentLogicTrack = path[pathIndex].LogicTrack();
+            bool currentTrackReserved;
+            if (!Compatibility.AITrafficCompatibility.TryIsTrackReservedLive(
+                path[pathIndex], out currentTrackReserved)
+                && Compatibility.AITrafficCompatibility.IsActive)
+            {
+                SignalHoldReason = "AI Traffic reservation status unavailable; holding";
+                return 0f;
+            }
+
+            if (currentTrackReserved)
+            {
+                SignalHoldReason = "AI Traffic reservation on current track: "
+                    + (currentLogicTrack.ID?.FullID ?? "Current track");
+                return 0f;
+            }
 
             // ── Check speed limits & intermediate obstacles ahead on path ─────
             for (int index = pathIndex + 1;
@@ -398,8 +549,17 @@ namespace RevisedDVRoute
                 if (logicTrack == null)
                     break;
 
-                // Intermediate track obstruction (foreign cars or train ahead before destination)
-                if (index < path.Count - 1 && !logicTrack.IsFree(trainset))
+                // Stop for any unrelated train ahead, including on the final
+                // track. Only the task's explicitly targeted consist is allowed
+                // to occupy the destination for a coupling approach.
+                bool aiTrafficReserved;
+                bool trafficStateAvailable = Compatibility.AITrafficCompatibility
+                    .TryIsTrackReservedLive(nextRailTrack, out aiTrafficReserved);
+                bool trafficStateUnknown = !trafficStateAvailable
+                    && Compatibility.AITrafficCompatibility.IsActive;
+                aiTrafficReserved = aiTrafficReserved || trafficStateUnknown;
+                bool occupiedByUnrelatedTrain = IsTrackOccupiedByUnrelatedTrain(logicTrack, ownCarIds);
+                if (aiTrafficReserved || occupiedByUnrelatedTrain)
                 {
                     float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
                     float stopBrakingDistance = Mathf.Max(0f, (float)distanceToLimit - responseDistance - 20.0f);
@@ -411,7 +571,12 @@ namespace RevisedDVRoute
                     if (stopTarget < target)
                     {
                         target = stopTarget;
-                        activeHoldReason = "Track occupied: " + (logicTrack.ID?.FullID ?? "Ahead");
+                        activeHoldReason = trafficStateUnknown
+                            ? "AI Traffic reservation status unavailable; holding before "
+                                + (logicTrack.ID?.FullID ?? "track ahead")
+                            : aiTrafficReserved
+                            ? "Waiting for AI Traffic reservation: " + (logicTrack.ID?.FullID ?? "Ahead")
+                            : "Track occupied: " + (logicTrack.ID?.FullID ?? "Ahead");
                     }
                 }
 
@@ -602,6 +767,9 @@ namespace RevisedDVRoute
             }
 
             RouteTracker = routeTracker;
+            _intendedApproachTrainsets.Clear();
+            if (RouteTracker.CurrentTask?.TrainSets != null)
+                _intendedApproachTrainsets.UnionWith(RouteTracker.CurrentTask.TrainSets);
 
             if (RouteTracker.TrackState == RouteTracker.TrackingState.OnFinish)
             {
@@ -709,12 +877,12 @@ namespace RevisedDVRoute
             if (!running)
                 yield break;
 
-            // A stopped tracker remains in WrongHeading/ReverseTrain until it
-            // observes movement in the new direction. Without a latch the old
-            // loop toggled the reverser again every 0.3 seconds.
+            // A stopped tracker remains in ReverseTrain until it observes
+            // movement in the new direction. Without a latch the old loop
+            // toggled the reverser again every 0.3 seconds.
             bool reversalArmed = true;
 
-            float prevSpeed = 0.0f;
+            float prevControlSpeed = 0.0f;
             float targetAcceleration = 2.5f;
             float prevTime = Time.time;
 
@@ -727,11 +895,11 @@ namespace RevisedDVRoute
             while (running)
             {
                 float speed = Mathf.Abs(remoteControl.GetForwardSpeed() * 3.6f);
-                float acceleration = (speed - prevSpeed) / timeDelta;
+                float selectedDirectionSpeed = GetSpeedInSelectedDirectionKph();
+                float routeProgressSpeed = Mathf.Max(0f, selectedDirectionSpeed);
 
                 if (couplerApproach)
                 {
-                    SignalHoldReason = null;
                     if (IsCouplerInRange(1.00f))
                     {
                         Terminal.Log($"coupler in ranch");
@@ -739,22 +907,24 @@ namespace RevisedDVRoute
                     }
                     else if (IsCouplerInRange(7.0f))
                     {
-                        TargetSpeed = 1.0f;
+                        TargetSpeed = Mathf.Min(1.0f, GetRouteSpeedTarget(routeProgressSpeed));
                     }
                     else
                     {
-                        TargetSpeed = COUPLER_APPROACH_SPEED;
+                        TargetSpeed = Mathf.Min(COUPLER_APPROACH_SPEED, GetRouteSpeedTarget(routeProgressSpeed));
                     }
                 }
                 else if (routeTracker.TrackState == RouteTracker.TrackingState.RightHeading)
                 {
-                    if (speed > 3.0f)
+                    // Only movement in the selected direction completes a
+                    // manoeuvre. Gravity-driven rollback must never re-arm a
+                    // second reverser change.
+                    if (selectedDirectionSpeed > 3.0f)
                         reversalArmed = true;
 
                     if (routeTracker.DistanceToFinish < 50.0f && !routeTracker.Route.LastTrack.LogicTrack().IsFree(routeTracker.Trainset)) //finds all couplers not only on right rail
                     {
-                        SignalHoldReason = null;
-                        TargetSpeed = COUPLER_APPROACH_SPEED;
+                        TargetSpeed = Mathf.Min(COUPLER_APPROACH_SPEED, GetRouteSpeedTarget(routeProgressSpeed));
                     }
                     else if (IsApproachingRotatingTurntable())
                     {
@@ -763,18 +933,19 @@ namespace RevisedDVRoute
                     }
                     else
                     {
-                        TargetSpeed = GetRouteSpeedTarget(speed);
+                        TargetSpeed = GetRouteSpeedTarget(routeProgressSpeed);
                     }
                 }
                 else if (routeTracker.TrackState == RouteTracker.TrackingState.OnStart
                     || routeTracker.TrackState == RouteTracker.TrackingState.BeforeStart)
                 {
-                    TargetSpeed = GetRouteSpeedTarget(speed);
+                    TargetSpeed = GetRouteSpeedTarget(routeProgressSpeed);
                 }
                 else if (routeTracker.TrackState == RouteTracker.TrackingState.StopTrainAfterSwitch)
                 {
-                    SignalHoldReason = null;
-                    TargetSpeed = 10.0f;
+                    // Keep the low-speed switch manoeuvre subject to the same
+                    // signal, occupancy, and track-limit envelope as route driving.
+                    TargetSpeed = Mathf.Min(10.0f, GetRouteSpeedTarget(routeProgressSpeed));
                 }
                 else if (routeTracker.TrackState == RouteTracker.TrackingState.WaitingForSignalReservation)
                 {
@@ -783,8 +954,15 @@ namespace RevisedDVRoute
                     // reverse manoeuvre is waiting for DV Signals to release it.
                     TargetSpeed = 0.0f;
                 }
-                else if (routeTracker.TrackState == RouteTracker.TrackingState.WrongHeading
-                    || routeTracker.TrackState == RouteTracker.TrackingState.ReverseTrain)
+                else if (routeTracker.TrackState == RouteTracker.TrackingState.WrongHeading)
+                {
+                    // WrongHeading can be produced by a consist rolling downhill
+                    // against the selected reverser. It is not a planned reversal.
+                    // Retain the route direction and let the controller's hill
+                    // hold build power against the independent brake.
+                    TargetSpeed = GetRouteSpeedTarget(routeProgressSpeed);
+                }
+                else if (routeTracker.TrackState == RouteTracker.TrackingState.ReverseTrain)
                 {
                     if (reversalArmed)
                     {
@@ -803,7 +981,13 @@ namespace RevisedDVRoute
                     // confirm the new heading. Signal/occupancy restrictions still
                     // reduce this target to zero when movement is not authorized.
                     if (!reversalArmed)
-                        TargetSpeed = GetRouteSpeedTarget(speed);
+                        TargetSpeed = GetRouteSpeedTarget(routeProgressSpeed);
+                }
+
+                if (stopRequested)
+                {
+                    TargetSpeed = 0f;
+                    SignalHoldReason = "Stopping";
                 }
 
                 if (!string.IsNullOrEmpty(SignalHoldReason))
@@ -812,8 +996,18 @@ namespace RevisedDVRoute
                     if (SignalHoldReason != lastLoggedHoldReason)
                     {
                         lastLoggedHoldReason = SignalHoldReason;
-                        Terminal.Log($"[Loco AI] Holding: {SignalHoldReason}");
-                        Module.mod?.Logger.Log($"[Loco AI] Holding: {SignalHoldReason}");
+                        IList<RailTrack> activePath = routeTracker?.Route?.Path;
+                        int activePathIndex = routeTracker?.CurrentPathIndex ?? -1;
+                        string currentTrackId = activePath != null && activePathIndex >= 0
+                            && activePathIndex < activePath.Count
+                            ? activePath[activePathIndex].LogicTrack()?.ID?.FullID ?? "unknown"
+                            : "unknown";
+                        string holdDetails = $"[Loco AI] Holding: {SignalHoldReason}; "
+                            + $"track={currentTrackId}, speed={speed:0.0} km/h, "
+                            + $"target={TargetSpeed:0.0} km/h, "
+                            + $"next-track={RouteTracker.DistanceToNextTrack:0} m";
+                        Terminal.Log(holdDetails);
+                        Module.mod?.Logger.Log(holdDetails);
                     }
                 }
                 else if (lastLoggedHoldReason != null)
@@ -835,10 +1029,19 @@ namespace RevisedDVRoute
                     }
                 }
 
-                targetAcceleration = MaintainSpeed(targetAcceleration, timeDelta, speed, acceleration);
+                // Use actual magnitude while stopping, but only forward progress
+                // while applying power. Otherwise downhill rollback appears as
+                // positive acceleration and the PID removes the power needed to
+                // recover.
+                float controlSpeed = TargetSpeed < Mathf.Epsilon ? speed : routeProgressSpeed;
+                float acceleration = (controlSpeed - prevControlSpeed) / timeDelta;
+                targetAcceleration = MaintainSpeed(targetAcceleration, timeDelta, controlSpeed, acceleration);
                 UpdateLocomotiveDevices(speed);
 
-                prevSpeed = speed;
+                if (stopRequested && speed <= 0.25f)
+                    break;
+
+                prevControlSpeed = controlSpeed;
 
                 yield return new WaitForSeconds(TIME_WAIT);
 
@@ -911,7 +1114,7 @@ namespace RevisedDVRoute
         private IEnumerator ReleaseBrakesForDeparture()
         {
             const int MAX_RELEASE_STEPS = 60;
-            for (int step = 0; step < MAX_RELEASE_STEPS && running; step++)
+            for (int step = 0; step < MAX_RELEASE_STEPS && running && !stopRequested; step++)
             {
                 remoteControl.UpdateThrottle(-100f);
                 MoveTrainBrakeTowards(0f);
@@ -924,11 +1127,11 @@ namespace RevisedDVRoute
                 yield return new WaitForSeconds(0.1f);
             }
 
-            if (running && (remoteControl.GetTargetBrake() > 0.01f
+            if (running && !stopRequested && (remoteControl.GetTargetBrake() > 0.01f
                 || remoteControl.GetTargetIndependentBrake() > 0.01f))
             {
                 Terminal.Log("Autonomous driver could not release the brakes; departure cancelled");
-                running = false;
+                stopRequested = true;
             }
         }
 
@@ -944,7 +1147,8 @@ namespace RevisedDVRoute
             // Do not change direction while rolling. Secure the train first and
             // retain the brakes until the caller explicitly releases them.
             float stopStarted = Time.time;
-            while (running && Mathf.Abs(remoteControl.GetForwardSpeed()) > STOP_SPEED_MPS)
+            while (running && !stopRequested
+                && Mathf.Abs(remoteControl.GetForwardSpeed()) > STOP_SPEED_MPS)
             {
                 remoteControl.UpdateThrottle(-100f);
                 MoveTrainBrakeTowards(0.5f);
@@ -954,14 +1158,15 @@ namespace RevisedDVRoute
                 if (Time.time - stopStarted > 45f)
                 {
                     Terminal.Log("Autonomous driver could not stop before selecting direction; AI stopped");
-                    running = false;
+                    stopRequested = true;
                     yield break;
                 }
 
                 yield return new WaitForSeconds(0.1f);
             }
 
-            for (int step = 0; running && Mathf.Abs(current - target) > REVERSER_TOLERANCE && step < 4; step++)
+            for (int step = 0; running && !stopRequested
+                && Mathf.Abs(current - target) > REVERSER_TOLERANCE && step < 4; step++)
             {
                 remoteControl.UpdateReverser(current < target ? ToggleDirection.UP : ToggleDirection.DOWN);
                 yield return null;
@@ -970,8 +1175,11 @@ namespace RevisedDVRoute
 
             if (Mathf.Abs(current - target) > REVERSER_TOLERANCE)
             {
+                if (stopRequested)
+                    yield break;
+
                 Terminal.Log($"Autonomous driver could not select {(forward ? "forward" : "reverse")}; AI stopped");
-                running = false;
+                stopRequested = true;
                 yield break;
             }
 
@@ -983,7 +1191,7 @@ namespace RevisedDVRoute
             bool direction = remoteControl.GetReverserValue() > 0.5f;
             float stopStarted = Time.time;
 
-            while (running && (remoteControl.GetTargetThrottle() > Mathf.Epsilon
+            while (running && !stopRequested && (remoteControl.GetTargetThrottle() > Mathf.Epsilon
                 || Mathf.Abs(remoteControl.GetForwardSpeed()) > 0.1f))
             {
                 remoteControl.UpdateThrottle(-100.0f);
@@ -994,13 +1202,13 @@ namespace RevisedDVRoute
                 if (Time.time - stopStarted > 45f)
                 {
                     Terminal.Log("Autonomous driver could not stop for reversal; AI stopped");
-                    running = false;
+                    stopRequested = true;
                     yield break;
                 }
                 yield return null;
             }
 
-            if (!running)
+            if (!running || stopRequested)
                 yield break;
 
             yield return SetReverserDirection(!direction);
@@ -1179,6 +1387,11 @@ namespace RevisedDVRoute
                     }
 
                     var chain1 = RouteTaskChain.FromDestination(carTrack, loco.trainset);
+                    // Preserve the destination's intended freight consist after
+                    // RouteTracker marks the destination task complete. The AI
+                    // still needs that identity while making its final approach.
+                    if (chain1?.tasks?.Count > 0)
+                        chain1.tasks[0].TrainSets.UnionWith(task.TrainSets);
                     var tracker1 = new RouteTracker(chain1, true);
                     tracker1.SetRoute(toCarsTask.Result, loco.trainset);
                     Module.ActiveRoute.Route = toCarsTask.Result;

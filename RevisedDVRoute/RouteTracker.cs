@@ -67,6 +67,14 @@ namespace RevisedDVRoute
         /// <summary>Physical metres remaining before the next route track begins.</summary>
         public double DistanceToNextTrack { get; private set; }
 
+        /// <summary>Leading route-end bogie position for precise signal and obstacle lookahead.</summary>
+        public double LeadingTrackSpan { get; private set; }
+
+        public RailTrack LeadingRailTrack { get; private set; }
+
+        /// <summary>Track-curve traversal direction: +1 toward Out, -1 toward In.</summary>
+        public float LeadingTrackDirection { get; private set; } = 1f;
+
         public double DistanceToFinish
         {
             get
@@ -90,6 +98,9 @@ namespace RevisedDVRoute
             DistanceTraveled = 0.0;
             CurrentPathIndex = -1;
             DistanceToNextTrack = 0.0;
+            LeadingTrackSpan = 0.0;
+            LeadingRailTrack = null;
+            LeadingTrackDirection = 1f;
 
             TrackState = TrackingState.BeforeStart;
 
@@ -251,7 +262,9 @@ namespace RevisedDVRoute
 
                     lastTime = Time.time;
 
-                    if (PlayerManager.LastLoco != null && ! AppUtil.Instance.IsTimePaused)
+                    if (Trainset?.firstCar != null
+                        && Trainset.lastCar != null
+                        && !AppUtil.Instance.IsTimePaused)
                     {
                         TrainCar firstCar = Trainset.firstCar;
                         TrainCar lastCar = Trainset.lastCar;
@@ -351,6 +364,22 @@ namespace RevisedDVRoute
             if (isOnTrack)
             {
                 CurrentPathIndex = pathData.pathIndex;
+                LeadingRailTrack = car.track;
+                LeadingTrackSpan = car.Span;
+                if (pathData.nextTrack != null)
+                {
+                    LeadingTrackDirection = pathData.currentTrack.IsTrackOutBranch(pathData.nextTrack)
+                        ? 1f : -1f;
+                }
+                else if (pathData.prevTrack != null)
+                {
+                    LeadingTrackDirection = pathData.currentTrack.IsTrackInBranch(pathData.prevTrack)
+                        ? 1f : -1f;
+                }
+                else
+                {
+                    LeadingTrackDirection = car.TrackDirection ? 1f : -1f;
+                }
                 double trackLength = pathData.currentTrack.LogicTrack().length;
                 double distanceToNext = trackLength
                     - Math.Min(trackLength, Math.Max(0.0, car.PosOnTrack));
@@ -369,6 +398,10 @@ namespace RevisedDVRoute
 
                 DistanceToNextTrack = Math.Max(0.0,
                     Math.Min(trackLength, distanceToNext));
+            }
+            else
+            {
+                LeadingRailTrack = null;
             }
 
             if (transitionAligned && !car.moving && pathData != null
@@ -473,7 +506,9 @@ namespace RevisedDVRoute
             }
             else if (TrackState == TrackingState.RightHeading)
             {
-                if (firstCar.track.LogicTrack() == CurrentTask.DestinationTrack || lastCar.track.LogicTrack() == CurrentTask.DestinationTrack)
+                if (CurrentTask?.DestinationTrack != null
+                    && (firstCar.track.LogicTrack() == CurrentTask.DestinationTrack
+                        || lastCar.track.LogicTrack() == CurrentTask.DestinationTrack))
                 {
                     if ((firstCar.track.LogicTrack() == CurrentTask.DestinationTrack && lastCar.track.LogicTrack() == CurrentTask.DestinationTrack)
                         || CurrentTask.DestinationTrack.IsOccupiedAtLeast(0.8f)
@@ -549,6 +584,15 @@ namespace RevisedDVRoute
 #endif
                 if (junction.IsFree())
                 {
+                    Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
+                    if (Compatibility.AITrafficCompatibility.IsJunctionReserved(
+                        junction, out _))
+                    {
+                        TrackState = TrackingState.WaitingForSignalReservation;
+                        yield return new WaitForSeconds(1.0f);
+                        continue;
+                    }
+
                     string reservationOwner;
                     if (Compatibility.DVSignalsCompatibility.CanSwitchJunction(junction, out reservationOwner))
                     {

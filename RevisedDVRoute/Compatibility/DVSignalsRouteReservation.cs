@@ -113,8 +113,9 @@ namespace RevisedDVRoute.Compatibility
         internal static int ReservedLastPathIndex => reservedLastPathIndex;
 
         /// <summary>
-        /// Scans the remaining route path for any signal, unreserved block, or aspect restriction.
-        /// Returns true if a signal-related stop or speed restriction exists ahead.
+        /// Scans the remaining route for reservation and ADS block conflicts.
+        /// Physical STOP aspects are checked separately at their mast positions
+        /// by DVSignalsCompatibility.TryGetStopSignalAhead.
         /// </summary>
         internal static bool GetSignalRestrictionAhead(
             Route route,
@@ -142,8 +143,24 @@ namespace RevisedDVRoute.Compatibility
                 RailTrack track = route.Path[i];
                 if (track == null) break;
 
-                // 1. Check if track is reserved by a foreign train/signal in DV Signals
-                if (DVSignalsCompatibility.IsTrackReservedByOther(track, out string owner))
+                // 1. An AI never owns the player route's rolling reservation.
+                // Treat every active DV Signals reservation as foreign here;
+                // the player planner uses a separate API that ignores its own.
+                bool reserved;
+                string owner;
+                if (!DVSignalsCompatibility.TryIsTrackReservedForAI(track,
+                    out reserved, out owner))
+                {
+                    // With no trustworthy authority state there is no safe
+                    // signal distance to calculate. Hold here rather than
+                    // continuing on an assumed-clear aspect.
+                    distanceToRestriction = 0.0;
+                    restrictedSpeedKph = 0f;
+                    signalReason = "DV Signals reservation status unavailable; holding";
+                    return true;
+                }
+
+                if (reserved)
                 {
                     distanceToRestriction = dist;
                     restrictedSpeedKph = 0f;

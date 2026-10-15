@@ -19,6 +19,7 @@ namespace RevisedDVRoute
 
         public float TargetSpeed { get; protected set; } = 20.0f;
         protected bool running;
+        protected bool stopRequested;
 
         private static LocoCruiseControl CruiseControl;
 
@@ -52,6 +53,7 @@ namespace RevisedDVRoute
         private float _slipCooldownUntilTime = -999f;
         private bool _sanderActive = false;
         private float _lastThrottleStepTime = -999f;
+        private bool _hillStartAssistActive = false;
 
         public LocoCruiseControl(ILocomotiveRemoteControl remoteControl, TrainCar car = null)
         {
@@ -247,11 +249,29 @@ namespace RevisedDVRoute
         {
             integral = 0f;
             previousError = 0f;
+            stopRequested = false;
             _awaitingShift = false;
             _pendingShiftDir = 0;
             _sandHoldUntilTime = -999f;
             _slipCooldownUntilTime = -999f;
             _lastThrottleStepTime = -999f;
+            _hillStartAssistActive = false;
+        }
+
+        /// <summary>
+        /// Returns positive speed when the locomotive is moving in the direction
+        /// selected by the reverser and negative speed when it is rolling against it.
+        /// </summary>
+        protected float GetSpeedInSelectedDirectionKph()
+        {
+            float signedSpeedKph = remoteControl.GetForwardSpeed() * 3.6f;
+            float reverser = remoteControl.GetReverserValue();
+
+            if (reverser > 0.5f)
+                return signedSpeedKph;
+            if (reverser < 0.5f)
+                return -signedSpeedKph;
+            return 0f;
         }
 
         // ── Main speed controller ────────────────────────────────────────────
@@ -260,9 +280,30 @@ namespace RevisedDVRoute
         {
             if (remoteControl.GetReverserSymbol() == "N")
             {
-                running = false;
-                return 0.0f;
+                this.stopRequested = true;
+                TargetSpeed = 0f;
             }
+
+            float selectedDirectionSpeed = GetSpeedInSelectedDirectionKph();
+            if (TargetSpeed < Mathf.Epsilon)
+            {
+                _hillStartAssistActive = false;
+            }
+            else if (selectedDirectionSpeed < -0.25f)
+            {
+                // Gravity is moving the train against the selected reverser.
+                // Hold it with the independent brake while traction builds.
+                _hillStartAssistActive = true;
+            }
+            else if (_hillStartAssistActive
+                && selectedDirectionSpeed > 1.5f
+                && remoteControl.GetTargetIndependentBrake() <= BRAKE_RELEASE_EPSILON)
+            {
+                _hillStartAssistActive = false;
+            }
+
+            if (_hillStartAssistActive)
+                _sandHoldUntilTime = Mathf.Max(_sandHoldUntilTime, Time.time + 2.5f);
 
             // ── DM3: cap speed and handle gear shift ─────────────────────────
             if (_isDM3)
@@ -350,24 +391,37 @@ namespace RevisedDVRoute
 
                 if (stopRequested)
                 {
-                    desiredDynamicBrake = speed > 10f ? 1.0f : 0f;
-                    desiredTrainBrake = Mathf.Lerp(0.35f, 0.75f, Mathf.Clamp01(speed / 30f));
-                }
-                else
-                {
-                    // Overspeed management on downhill or after speed limit drop:
-                    if (hasDynamicBrake && overspeed < 8.0f)
+                    if (hasDynamicBrake && speed > 10f)
                     {
-                        // Moderate overspeed: modulate dynamic brake smoothly, keep air brakes released
-                        desiredDynamicBrake = Mathf.Clamp01(overspeed / 5.0f);
-                        desiredTrainBrake = 0f;
+                        // Use dynamic braking for the mainline portion of a stop.
+                        // Keep a light train-brake application as a safety margin;
+                        // increase it if the consist is still gaining speed.
+                        desiredDynamicBrake = 1.0f;
+                        desiredTrainBrake = acceleration > 0.15f ? 0.35f : 0.15f;
                     }
                     else
                     {
-                        // Stronger overspeed: full dynamic brake + proportional air brake
-                        desiredDynamicBrake = 1.0f;
+                        // Dynamic braking fades at low speed; finish the stop on air.
+                        desiredDynamicBrake = 0f;
+                        desiredTrainBrake = Mathf.Lerp(0.35f, 0.75f, Mathf.Clamp01(speed / 30f));
+                    }
+                }
+                else
+                {
+                    // Blend dynamic and train braking smoothly as overspeed grows.
+                    // The old 8 km/h threshold abruptly applied a large air-brake
+                    // command just after dynamic braking had reached full effort.
+                    if (hasDynamicBrake)
+                    {
+                        desiredDynamicBrake = Mathf.Clamp01(overspeed / 5.0f);
+                        desiredTrainBrake = Mathf.Clamp((overspeed - 5.0f) * 0.05f
+                            + Mathf.Max(0f, acceleration) * 0.05f, 0f, 0.55f);
+                    }
+                    else
+                    {
+                        desiredDynamicBrake = 0f;
                         float accelFactor = Mathf.Max(0f, acceleration * 0.10f);
-                        desiredTrainBrake = Mathf.Clamp(0.18f + (overspeed * 0.04f) + accelFactor, 0.15f, 0.75f);
+                        desiredTrainBrake = Mathf.Clamp(0.15f + (overspeed * 0.05f) + accelFactor, 0.15f, 0.75f);
                     }
                 }
 
@@ -379,14 +433,19 @@ namespace RevisedDVRoute
             }
             else
             {
-                // Not braking: release all brakes and dynamic brake
+                // Not braking: release the train and dynamic brakes. During a
+                // hill start, retain a modest independent-brake hold until the
+                // locomotive has enough power to prevent further rollback.
                 MoveDynamicBrakeTowards(0f);
                 MoveTrainBrakeTowards(0f);
-                MoveIndependentBrakeTowards(0f);
+                float hillHoldBrake = _hillStartAssistActive
+                    && remoteControl.GetTargetThrottle() < 0.5f ? 0.25f : 0f;
+                MoveIndependentBrakeTowards(hillHoldBrake);
 
                 bool dynBrakeReleased = controlsOverrider?.DynamicBrake == null || controlsOverrider.DynamicBrake.Value <= 0.05f;
                 bool airBrakesReleased = remoteControl.GetTargetBrake() <= BRAKE_RELEASE_EPSILON
-                    && remoteControl.GetTargetIndependentBrake() <= BRAKE_RELEASE_EPSILON;
+                    && (remoteControl.GetTargetIndependentBrake() <= BRAKE_RELEASE_EPSILON
+                        || _hillStartAssistActive);
 
                 if (airBrakesReleased && dynBrakeReleased && thermalLevel != ThermalProtectionLevel.Critical && Time.time >= _slipCooldownUntilTime)
                 {
@@ -402,6 +461,20 @@ namespace RevisedDVRoute
                         maxThrottleCeiling = 0.75f; // Notch 6 max
                     else
                         maxThrottleCeiling = 0.88f; // Notch 7 max for mainline
+
+                    // A low-speed train that is not accelerating may be starting
+                    // on a grade. Permit the controller to keep adding power rather
+                    // than trapping a heavy consist at the normal speed-based cap.
+                    // The existing rate, amperage, wheel-slip and thermal limits
+                    // still apply, and coupling speeds remain deliberately gentle.
+                    if (TargetSpeed >= 10f
+                        && speed < 3f
+                        && speed < TargetSpeed - 5f
+                        && acceleration < 0.25f
+                        && thermalLevel == ThermalProtectionLevel.Normal)
+                    {
+                        maxThrottleCeiling = 1.0f;
+                    }
 
                     // If heavily loaded on open line and accelerating very slowly (< 0.25 km/h/s), permit full throttle
                     if (TargetSpeed > 45f && speed < TargetSpeed - 15f && acceleration < 0.25f && thermalLevel == ThermalProtectionLevel.Normal)
@@ -444,10 +517,13 @@ namespace RevisedDVRoute
                     float currentThrottle = remoteControl.GetTargetThrottle();
                     float desiredThrottle = Mathf.Clamp(controlValue * 0.05f, 0f, maxThrottleCeiling);
 
-                    // Rate-limit throttle increases to ~1 notch (0.125) every 0.8 seconds for smooth realistic application
+                    // Use the normal smooth ramp while running. A rollback needs
+                    // a faster, human-like power-brake start before gravity gains
+                    // more speed.
                     if (desiredThrottle > currentThrottle)
                     {
-                        if (Time.time - _lastThrottleStepTime >= 0.8f)
+                        float throttleStepInterval = _hillStartAssistActive ? 0.25f : 0.8f;
+                        if (Time.time - _lastThrottleStepTime >= throttleStepInterval)
                         {
                             float step = Mathf.Min(desiredThrottle - currentThrottle, 0.125f);
                             remoteControl.UpdateThrottle(step * 10f);
@@ -571,7 +647,8 @@ namespace RevisedDVRoute
 
         public void Stop()
         {
-            running = false;
+            stopRequested = true;
+            TargetSpeed = 0f;
         }
 
         protected IEnumerator CruiseControlCoroutine()
@@ -585,7 +662,10 @@ namespace RevisedDVRoute
 
             while (running)
             {
-                float speed        = Mathf.Abs(remoteControl.GetForwardSpeed() * 3.6f);
+                float absoluteSpeed = Mathf.Abs(remoteControl.GetForwardSpeed() * 3.6f);
+                float speed = TargetSpeed < Mathf.Epsilon
+                    ? absoluteSpeed
+                    : Mathf.Max(0f, GetSpeedInSelectedDirectionKph());
                 float acceleration = (speed - prevSpeed) / timeDelta;
 
                 targetAcceleration = MaintainSpeed(targetAcceleration, timeDelta, speed, acceleration);

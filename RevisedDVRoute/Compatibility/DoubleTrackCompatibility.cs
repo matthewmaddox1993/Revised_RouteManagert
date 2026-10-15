@@ -56,8 +56,8 @@ namespace RevisedDVRoute.Compatibility
             }
         }
 
-        // The path finder reads this immutable snapshot on its background
-        // worker. It is rebuilt wholesale on Unity's thread before each route.
+        // The path finder reads this immutable snapshot during its
+        // frame-yielding main-thread search. It is rebuilt before each route.
         private static volatile LayoutSnapshot currentLayout = LayoutSnapshot.Empty;
         private static string lastLoggedLayout;
         private static string lastPendingMode;
