@@ -2,7 +2,7 @@
 
 Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations support DV Signals interlocking, AI Traffic right-of-way, and both DoubleTrack layouts.
 
-> **Version:** 1.0.3<br>
+> **Version:** 1.0.4<br>
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete update notes.
@@ -164,7 +164,7 @@ route auto stop
 | Flipping says no opposite-heading path exists | Flip excludes the active route's first segment and searches the live rail graph again. Some origins—especially dead ends or Hard-layout corridors—have no second departure path. The log records the excluded segment and search rejection counts. |
 | AI Traffic does not yield to the route | Confirm DV Signals and AI Traffic are enabled, enable **Player Priority** in AI Traffic, and leave both DV Signals settings enabled in Revised DV Route. The F10 panel should report an active handoff. Existing AI trains inside an approach-locking or physically occupied block retain safety priority until clear. |
 | The log says the route is waiting for a DV Signals block | Another train or signal currently owns an overlapping block. Keep the train stopped at the signal; Revised DV Route retries an initially unavailable block. If DV Signals invalidates a previously owned block, local reservation writes are suspended until a new route is selected so the two mods cannot enter an aspect-update loop. |
-| The locomotive reverser alternates between forward and reverse | Stop automation and verify that the current 1.0.3 build is installed. Reverser changes now occur only for explicit `ReverseTrain` manoeuvres; rollback on a grade is stopped and recovered without changing direction. |
+| The locomotive reverser alternates between forward and reverse | Stop automation and verify that the current 1.0.4 build is installed. Reverser changes now occur only for explicit `ReverseTrain` manoeuvres; rollback on a grade is stopped and recovered without changing direction. |
 | AI or cruise control behaves unexpectedly | Stop the automation, take manual control, and report the situation with the mod log and the route/locomotive involved. |
 
 ## Gameplay performance
@@ -181,7 +181,7 @@ Visual Studio 2022 (or MSBuild), the .NET Framework 4.8 Developer Pack, a Derail
 MSBuild RevisedDVRoute\RevisedDVRoute.csproj /t:Rebuild /p:Configuration=Release /p:DVInstallPath="C:\Steam\steamapps\common\Derail Valley"
 ```
 
-The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.3.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
+The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.4.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
 
 For an isolated test build, select the **Test** solution configuration in Visual Studio/Rider or run:
 
