@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -11,7 +11,7 @@ namespace RevisedDVRoute
     public class Settings : UnityModManager.ModSettings, IDrawable
     {
         [Header("Routing")]
-        [Draw(DrawType.ToggleGroup, Label = "Reversing strategy")] public ReversingStrategy ReversingStrategy = ReversingStrategy.ChooseBest;
+        [Draw(DrawType.ToggleGroup, Label = "Reversing strategy")] public ReversingStrategy ReversingStrategy = ReversingStrategy.OnlyIfNeeded;
         [Header("Compatibility")]
         [Draw("Respect DV Signals reservations", DrawType.Toggle)] public bool RespectDVSignalsReservations = true;
         [Draw("Reserve next DV Signals block for active route", DrawType.Toggle)] public bool ReserveDVSignalsRoute = true;

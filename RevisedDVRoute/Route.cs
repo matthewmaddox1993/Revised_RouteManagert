@@ -21,7 +21,7 @@ namespace RevisedDVRoute
     public class Route
     {
         public const double REVERSE_SECTOR_LENGTH = 10.0;
-        private const double SWITCH_ALIGNMENT_LOOKAHEAD_METERS = 2000.0;
+        private const double SWITCH_ALIGNMENT_LOOKAHEAD_METERS = 500.0;
 
         public List<RailTrack> Path { get; }
         public Track Destination { get; }
@@ -186,9 +186,19 @@ namespace RevisedDVRoute
             AdjustSwitches(true);
         }
 
-        internal void AdjustSwitchesForSignalReservation()
+        internal void AdjustSwitchesForSignalReservation(int startPathIndex = 0)
         {
-            AdjustSwitches(false);
+            if (startPathIndex > 0)
+            {
+                double dist = 0.0;
+                for (int i = 0; i < startPathIndex && i < Path.Count; i++)
+                    dist += Path[i]?.LogicTrack()?.length ?? 0.0;
+                AdjustSwitchesAhead(startPathIndex, dist);
+            }
+            else
+            {
+                AdjustSwitchesAhead(0, 0.0);
+            }
         }
 
         /// <summary>
@@ -429,7 +439,12 @@ namespace RevisedDVRoute
                 }
 
                 Terminal.Log($"Switch {track.LogicTrack().ID.FullID} -> {trackToSwitch.LogicTrack().ID.FullID}");
-                junction.Switch(Junction.SwitchMode.NO_SOUND);
+                // Select the exact requested branch. Cycling the junction can
+                // choose the wrong exit on turnouts with more than two
+                // branches and prevents ADS from validating the intended
+                // protected-switch transition.
+                junction.Switch(Junction.SwitchMode.NO_SOUND, (byte)branchIndex);
+                Compatibility.DVSignalsCompatibility.UnlogBlockedJunction(junction);
                 return true;
             }
 
@@ -541,14 +556,26 @@ namespace RevisedDVRoute
 #if DEBUG
                 Terminal.Log($"Trying path with allowed reversing");
 #endif
+                // First try reversing while still respecting initial forward heading
                 var routeWithReversing = await FindRoute(begin, end, trainset, true, trackTransitions,
                     excludedTracks);
+
+                // If that failed and no route exists, try allowing reversing out of the start track
+                if (routeWithReversing == null && route == null && trackTransitions != null)
+                {
+                    routeWithReversing = await FindRoute(begin, end, trainset, true, null,
+                        excludedTracks);
+                }
 
                 if (routeWithReversing != null)
                 {
                     Terminal.Log($"withoutreversing: {route?.Length} withReversing: {routeWithReversing.Length}");
 
-                    route = (route == null || route.Length > routeWithReversing.Length) ? routeWithReversing : route;
+                    // If a direct route without reversing exists, only replace it if reversing is substantially shorter (at least 30% shorter)
+                    if (route == null || (reversingStrategy == ReversingStrategy.ChooseBest && routeWithReversing.Length < route.Length * 0.70))
+                    {
+                        route = routeWithReversing;
+                    }
                 }
             }
 

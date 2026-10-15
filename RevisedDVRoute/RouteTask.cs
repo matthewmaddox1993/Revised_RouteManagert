@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV.Logic.Job;
 using DV.Utils;
 using System;
@@ -20,6 +20,9 @@ namespace RevisedDVRoute
 
         public static RouteTaskChain FromDVJob(Job job)
         {
+            if (job?.tasks == null || job.tasks.Count == 0)
+                return null;
+
             if (job.tasks.Count == 1)
             {
                 Task task = job.tasks[0];
@@ -31,24 +34,33 @@ namespace RevisedDVRoute
 
         public static RouteTaskChain FromDVTask(Task task)
         {
+            if (task == null)
+                return null;
+
             switch (task.InstanceTaskType)
             {
                 case TaskType.Transport:
                 case TaskType.Warehouse:
+                    var singleRt = RouteTask.FromDVTask(task);
+                    if (singleRt == null)
+                        return null;
                     return new RouteTaskChain()
                     {
                         tasks = new List<RouteTask>()
                         {
-                            RouteTask.FromDVTask(task)
+                            singleRt
                         }
                     };
 
                 case TaskType.Sequential:
+                    var sData = task.GetTaskData();
+                    if (sData?.nestedTasks == null)
+                        return null;
                     RouteTaskChain first = null;
                     RouteTaskChain prev = null;
-                    foreach (var nestedTask in task.GetTaskData().nestedTasks)
+                    foreach (var nestedTask in sData.nestedTasks)
                     {
-                        if (nestedTask.IsTaskCompleted())
+                        if (nestedTask == null || nestedTask.IsTaskCompleted())
                             continue;
 
                         RouteTaskChain current = null;
@@ -80,9 +92,12 @@ namespace RevisedDVRoute
                     }
                     return first;
                 case TaskType.Parallel:
+                    var pData = task.GetTaskData();
+                    if (pData?.nestedTasks == null)
+                        return null;
                     RouteTaskChain result = new RouteTaskChain();
-                    result.tasks = task.GetTaskData().nestedTasks
-                        .Where(t => ! t.IsTaskCompleted())
+                    result.tasks = pData.nestedTasks
+                        .Where(t => t != null && !t.IsTaskCompleted())
                         .Select(t => RouteTask.FromDVTask(t))
                         .Where(rt => rt != null)
                         .ToList();
@@ -137,19 +152,26 @@ namespace RevisedDVRoute
 
         public static RouteTask FromDVTask(Task task)
         {
+            if (task == null)
+                return null;
+
             RouteTask newTask = new RouteTask();
 
 #if DEBUG
-            Terminal.Log($"job {task.Job.ID} type {task.InstanceTaskType} state {task.state}");
+            Terminal.Log($"job {task.Job?.ID} type {task.InstanceTaskType} state {task.state}");
 #endif
 
-            switch(task.InstanceTaskType)
+            switch (task.InstanceTaskType)
             {
                 case TaskType.Transport:
-                    newTask.InitFromTransportTask(task as TransportTask);
+                    var transportTask = task as TransportTask;
+                    if (transportTask == null) return null;
+                    newTask.InitFromTransportTask(transportTask);
                     break;
                 case TaskType.Warehouse:
-                    newTask.InitFromWarehouseTask(task as WarehouseTask);
+                    var warehouseTask = task as WarehouseTask;
+                    if (warehouseTask == null) return null;
+                    newTask.InitFromWarehouseTask(warehouseTask);
                     break;
                 default:
                     return null;
@@ -162,7 +184,8 @@ namespace RevisedDVRoute
         {
             RouteTask newTask = new RouteTask();
             newTask.DestinationTrack = destination;
-            newTask.TrainSets.Add(trainset);
+            if (trainset != null)
+                newTask.TrainSets.Add(trainset);
 
             return newTask;
         }
@@ -179,27 +202,35 @@ namespace RevisedDVRoute
                 if (!TrainCarRegistry.Instance.logicCarToTrainCar.TryGetValue(car, out trainCar))
                     return;
 
-                if (!TrainSets.Contains(trainCar.trainset))
+                if (trainCar?.trainset != null && !TrainSets.Contains(trainCar.trainset))
                     TrainSets.Add(trainCar.trainset);
             });
         }
 
         private void InitFromWarehouseTask(WarehouseTask task)
         {
-            Terminal.Log($"warehouse task nested: {task.GetTaskData().nestedTasks?.Count} cars: {task.GetTaskData().cars?.Count}");
+            if (task == null) return;
+            var taskData = task.GetTaskData();
+            if (taskData == null) return;
 
-            DestinationTrack = task.GetTaskData().destinationTrack;
+            Terminal.Log($"warehouse task nested: {taskData.nestedTasks?.Count} cars: {taskData.cars?.Count}");
+
+            DestinationTrack = taskData.destinationTrack;
             DVTask = task;
-            GetTrainsets(task.GetTaskData().cars);
+            GetTrainsets(taskData.cars);
         }
 
         private void InitFromTransportTask(TransportTask task)
         {
-            Terminal.Log($"transport task nested: {task.GetTaskData().nestedTasks?.Count} cars: {task.GetTaskData().cars?.Count}");
+            if (task == null) return;
+            var taskData = task.GetTaskData();
+            if (taskData == null) return;
 
-            DestinationTrack = task.GetTaskData().destinationTrack;
+            Terminal.Log($"transport task nested: {taskData.nestedTasks?.Count} cars: {taskData.cars?.Count}");
+
+            DestinationTrack = taskData.destinationTrack;
             DVTask = task;
-            GetTrainsets(task.GetTaskData().cars);
+            GetTrainsets(taskData.cars);
         }
     }
 }

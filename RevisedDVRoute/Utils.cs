@@ -57,6 +57,71 @@ namespace RevisedDVRoute
             return (aBoogie, bBoogie);
         }
 
+        /// <summary>
+        /// Returns the two physical ends of the consist, ordered relative to the
+        /// controlled locomotive rather than Trainset's arbitrary list order.
+        /// </summary>
+        public static (Bogie forwardBogie, Bogie rearBogie) GetOuterBogiesRelativeTo(TrainCar loco)
+        {
+            if (loco == null)
+                return (null, null);
+
+            Trainset trainset = loco.trainset;
+            TrainCar firstCar = trainset?.firstCar ?? loco;
+            TrainCar lastCar = trainset?.lastCar ?? loco;
+            var (firstOuter, lastOuter) = GetBogiesWithMaxDistance(firstCar, lastCar);
+
+            // A single vehicle has an unambiguous front/rear bogie definition.
+            if (firstCar == lastCar)
+            {
+                Bogie front = loco.Bogies?.FirstOrDefault(b => b != null && !b.HasDerailed
+                    && b.track != null && b.isFrontBogie);
+                Bogie rear = loco.Bogies?.FirstOrDefault(b => b != null && !b.HasDerailed
+                    && b.track != null && !b.isFrontBogie);
+                if (front != null)
+                    return (front, rear ?? lastOuter);
+            }
+
+            if (firstOuter == null || lastOuter == null)
+            {
+                Bogie fallback = loco.Bogies?.FirstOrDefault(b => b != null && !b.HasDerailed && b.track != null);
+                return (fallback, null);
+            }
+
+            int locoIndex = trainset?.cars?.IndexOf(loco) ?? -1;
+            if (locoIndex >= 0 && trainset.cars.Count > 1)
+            {
+                int neighborIndex = locoIndex < trainset.cars.Count - 1 ? locoIndex + 1 : locoIndex - 1;
+                TrainCar neighbor = trainset.cars[neighborIndex];
+                bool neighborIsAhead = Vector3.Dot(loco.transform.forward,
+                    neighbor.transform.position - loco.transform.position) > 0f;
+                bool forwardIsHigherIndex = (neighborIndex > locoIndex) == neighborIsAhead;
+                return forwardIsHigherIndex
+                    ? (lastOuter, firstOuter)
+                    : (firstOuter, lastOuter);
+            }
+
+            // Defensive fallback for an incomplete Trainset: choose the endpoint
+            // lying most in front of the locomotive.
+            float firstDot = Vector3.Dot(loco.transform.forward,
+                firstOuter.transform.position - loco.transform.position);
+            float lastDot = Vector3.Dot(loco.transform.forward,
+                lastOuter.transform.position - loco.transform.position);
+            return firstDot >= lastDot
+                ? (firstOuter, lastOuter)
+                : (lastOuter, firstOuter);
+        }
+
+        /// <summary>
+        /// True when moving away from the consist through this outer bogie heads
+        /// toward the rail track's Out connection. A rear bogie's outward motion
+        /// is opposite its car-forward direction.
+        /// </summary>
+        public static bool OutwardFromBogieFacesTrackOut(Bogie bogie)
+        {
+            return bogie != null && ((bogie.TrackDirectionSign > 0f) == bogie.isFrontBogie);
+        }
+
 
         public static float GetAngleDifference(float alpha, float beta)
         {

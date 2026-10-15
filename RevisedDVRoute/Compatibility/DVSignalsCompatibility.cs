@@ -64,6 +64,7 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         public static void BeginPlayerRouteReservation(Route route)
         {
+            ClearLoggedBlockedJunctions();
             DVSignalsRouteReservation.Begin(route);
         }
 
@@ -82,6 +83,7 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         public static void ClearPlayerRouteReservation()
         {
+            ClearLoggedBlockedJunctions();
             DVSignalsRouteReservation.Clear();
         }
 
@@ -124,6 +126,19 @@ namespace RevisedDVRoute.Compatibility
             get { return snapshotIsActive ? reservationSnapshot.Count : 0; }
         }
 
+        private static readonly HashSet<int> LoggedBlockedJunctions = new HashSet<int>();
+
+        public static void ClearLoggedBlockedJunctions()
+        {
+            LoggedBlockedJunctions.Clear();
+        }
+
+        public static void UnlogBlockedJunction(Junction junction)
+        {
+            if (junction != null)
+                LoggedBlockedJunctions.Remove(junction.GetInstanceID());
+        }
+
         /// <summary>
         /// A junction can only be changed when none of its connected rails is
         /// protected by a foreign DV Signals reservation. The rolling
@@ -133,7 +148,10 @@ namespace RevisedDVRoute.Compatibility
         {
             reservationOwner = null;
             if (!ProtectionEnabled || junction == null || !EnsureApi())
+            {
+                UnlogBlockedJunction(junction);
                 return true;
+            }
 
             RailTrack incoming = junction.inBranch?.track;
             if (TryGetReservation(incoming, out reservationOwner))
@@ -148,11 +166,15 @@ namespace RevisedDVRoute.Compatibility
                 }
             }
 
+            UnlogBlockedJunction(junction);
             return true;
         }
 
         public static void LogBlockedJunctionSwitch(Junction junction, string reservationOwner)
         {
+            if (junction != null && !LoggedBlockedJunctions.Add(junction.GetInstanceID()))
+                return;
+
             string junctionName = junction == null ? null : junction.junctionData.junctionIdLong;
             if (string.IsNullOrEmpty(junctionName))
                 junctionName = junction?.name ?? "unknown junction";
@@ -242,6 +264,12 @@ namespace RevisedDVRoute.Compatibility
             return true;
         }
 
+        internal static bool IsTrackReservedByOther(RailTrack track, out string reservationOwner)
+        {
+            EnsureApi();
+            return TryGetReservation(track, out reservationOwner);
+        }
+
         private static bool TryGetReservation(RailTrack track, out string reservationOwner)
         {
             reservationOwner = null;
@@ -256,6 +284,13 @@ namespace RevisedDVRoute.Compatibility
 
                 object signal = arguments[1];
                 if (DVSignalsRouteReservation.OwnsSignal(signal))
+                    return false;
+
+                // ADS reserves through the same native DV Signals head. Once
+                // ADS has accepted this exact consist/path/signal, that
+                // reservation is our route authority rather than a foreign
+                // blocker.
+                if (DVSignalsRouteReservation.IsADSAuthoritySignal(signal))
                     return false;
 
                 reservationOwner = signalName?.GetValue(signal, null) as string;

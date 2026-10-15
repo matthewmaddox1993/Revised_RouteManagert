@@ -73,7 +73,9 @@ namespace RevisedDVRoute
 
             if (args[0].String == "job" || args[0].String == "loco")
             {
-                List<JobBooklet> allJobBooklets = new List<JobBooklet>(JobBooklet.allExistingJobBooklets);
+                List<JobBooklet> allJobBooklets = JobBooklet.allExistingJobBooklets != null
+                    ? JobBooklet.allExistingJobBooklets.Where(j => j != null && j.job != null).ToList()
+                    : new List<JobBooklet>();
                 JobBooklet jobBooklet = null;
 
                 if (allJobBooklets.Count == 0)
@@ -85,10 +87,10 @@ namespace RevisedDVRoute
                 {
                     if (args.Length < 2)
                     {
-                        throw new CommandException("Multiple job, specify job name");
+                        throw new CommandException("Multiple jobs, specify job name");
                     }
 
-                    jobBooklet = allJobBooklets.FirstOrDefault(j => j.job.ID == args[1].String);
+                    jobBooklet = allJobBooklets.FirstOrDefault(j => j?.job?.ID == args[1].String);
                 }
                 else
                 {
@@ -96,7 +98,7 @@ namespace RevisedDVRoute
                 }
 
 
-                if (jobBooklet == null)
+                if (jobBooklet == null || jobBooklet.job == null)
                 {
                     throw new CommandException("Unknown job");
                 }
@@ -136,9 +138,9 @@ namespace RevisedDVRoute
                     throw new CommandException("No suitable task");
                 }
 
-                Track startTrack = trainCar.trainset.firstCar.Bogies[0].track.LogicTrack();
+                var (startTrack, bannedTransitions) = GetTrainDepartureInfo(trainCar);
 
-                await FindAndSwitch(startTrack, routeTracker.CurrentTask.DestinationTrack, ReversingStrategy.ChooseBest, trainCar.trainset);
+                await FindAndSwitch(startTrack, routeTracker.CurrentTask.DestinationTrack, Module.settings.ReversingStrategy, trainCar.trainset, bannedTransitions);
 
                 routeTracker.SetRoute(Module.ActiveRoute.Route, trainCar.trainset);
 
@@ -161,9 +163,9 @@ namespace RevisedDVRoute
                     throw new CommandException("Tracker has no task");
                 }
 
-                Track startTrack = trainCar.trainset.firstCar.Bogies[0].track.LogicTrack();
+                var (startTrack, bannedTransitions) = GetTrainDepartureInfo(trainCar);
 
-                await FindAndSwitch(startTrack, Module.ActiveRoute.RouteTracker.CurrentTask.DestinationTrack, ReversingStrategy.ChooseBest, trainCar.trainset);
+                await FindAndSwitch(startTrack, Module.ActiveRoute.RouteTracker.CurrentTask.DestinationTrack, Module.settings.ReversingStrategy, trainCar.trainset, bannedTransitions);
 
                 Module.ActiveRoute.RouteTracker.SetRoute(Module.ActiveRoute.Route, trainCar.trainset);
             }
@@ -180,14 +182,8 @@ namespace RevisedDVRoute
                         throw new CommandException("No last loco");
                     }
 
-                    if (trainCar.trainset.firstCar.logicCar.BogiesOnSameTrack)
-                    {
-                        args[1].String = trainCar.trainset.firstCar.logicCar.CurrentTrack.ID.FullID;
-                    }
-                    else
-                    {
-                        args[1].String = trainCar.trainset.firstCar.logicCar.FrontBogieTrack.ID.FullID;
-                    }
+                    var (startTrackLogic, _) = GetTrainDepartureInfo(trainCar);
+                    args[1].String = startTrackLogic?.ID?.FullID ?? trainCar.Bogies[0].track.LogicTrack().ID.FullID;
 
                     trainset = trainCar.trainset;
                     Terminal.Log($"current loco track end");
@@ -340,14 +336,14 @@ namespace RevisedDVRoute
                     throw new CommandException("Goal track not found");
                 }
 
-                Track startTrack = trainCar.trainset.firstCar.Bogies[0].track.LogicTrack();
+                var (startTrack, bannedTransitions) = GetTrainDepartureInfo(trainCar);
                 Track destTrack = goalTrack.LogicTrack();
 
                 Route route;
                 try
                 {
                     route = await FindRouteWithADSAlternative(startTrack, destTrack,
-                        ReversingStrategy.ChooseBest, trainCar.trainset);
+                        Module.settings.ReversingStrategy, trainCar.trainset, bannedTransitions);
                 }
                 catch
                 {
@@ -373,7 +369,48 @@ namespace RevisedDVRoute
 
         }
 
-        private async static System.Threading.Tasks.Task FindAndSwitch(Track begin, Track end, ReversingStrategy reversingStrategy, Trainset trainset)
+        public static (Track startTrack, List<TrackTransition> bannedTransitions) GetTrainDepartureInfo(TrainCar loco)
+        {
+            if (loco == null)
+                return (null, null);
+
+            // Route from the physical end lying ahead of the controlled locomotive.
+            // The old implementation used Bogies[0] and the current reverser, both
+            // of which can describe the opposite end of the train.
+            var (leadingBogie, _) = Utils.GetOuterBogiesRelativeTo(loco);
+            RailTrack startRailTrack = leadingBogie?.track
+                ?? loco.Bogies?.FirstOrDefault(b => b != null && !b.HasDerailed && b.track != null)?.track;
+            Track startTrack = startRailTrack?.LogicTrack();
+
+            List<TrackTransition> bannedTransitions = null;
+            if (startRailTrack != null && leadingBogie != null)
+            {
+                bannedTransitions = new List<TrackTransition>();
+                bool departureFacesOut = Utils.OutwardFromBogieFacesTrackOut(leadingBogie);
+                var rearBranches = departureFacesOut
+                    ? (startRailTrack.inIsConnected ? startRailTrack.GetAllInBranches() : null)
+                    : (startRailTrack.outIsConnected ? startRailTrack.GetAllOutBranches() : null);
+
+                if (rearBranches != null)
+                {
+                    foreach (var branch in rearBranches)
+                    {
+                        if (branch?.track != null)
+                        {
+                            bannedTransitions.Add(new TrackTransition() { track = startRailTrack, nextTrack = branch.track });
+                        }
+                    }
+                }
+
+                string endName = leadingBogie.isFrontBogie ? "front" : "rear";
+                Terminal.Log($"AI departure: loco {loco.logicCar?.ID}, {leadingBogie.Car?.logicCar?.ID} {endName} bogie on "
+                    + $"{startTrack?.ID?.FullID}, heading {(departureFacesOut ? "Out" : "In")}");
+            }
+
+            return (startTrack, bannedTransitions);
+        }
+
+        private async static System.Threading.Tasks.Task FindAndSwitch(Track begin, Track end, ReversingStrategy reversingStrategy, Trainset trainset, List<TrackTransition> bannedTransitions = null)
         {
             if (begin is null)
             {
@@ -388,7 +425,7 @@ namespace RevisedDVRoute
             Route route;
             try
             {
-                route = await FindRouteWithADSAlternative(begin, end, reversingStrategy, trainset);
+                route = await FindRouteWithADSAlternative(begin, end, reversingStrategy, trainset, bannedTransitions);
             }
             catch
             {

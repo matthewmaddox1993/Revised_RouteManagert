@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV;
 using DV.Logic.Job;
 using RevisedDVRoute.Internals;
@@ -98,7 +98,7 @@ namespace RevisedDVRoute.CommsRadio
                             string routeInfo = $"Right heading\n" +
                                 $"Remaining: {distance:0.#} km"
 #if DEBUG
-                                + $"\nSpeed: {Module.ActiveRoute.RouteTracker.RecommendedSpeed:0} km/h"
+                                + $"\nSpeed: {Compatibility.MphCompatibility.FormatSpeed(Module.ActiveRoute.RouteTracker.RecommendedSpeed)}"
 #endif
                                 + $"\nTime: {elapsedTimeStr}"
                                 ;

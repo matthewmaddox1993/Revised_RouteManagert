@@ -140,13 +140,22 @@ namespace RevisedDVRoute.CommsRadio
 
         private static AStateBehaviour BuildJobRoute(bool fromLoco)
         {
-            var booklets = new List<JobBooklet>(JobBooklet.allExistingJobBooklets);
+            if (JobBooklet.allExistingJobBooklets == null)
+                return new RouteManagerMessageState("No job booklets found", new RouteManagerNewRouteState());
+
+            var booklets = JobBooklet.allExistingJobBooklets
+                .Where(b => b != null && b.job != null)
+                .ToList();
+
             if (booklets.Count == 0)
                 return new RouteManagerMessageState("No job booklets found", new RouteManagerNewRouteState());
 
             if (booklets.Count == 1)
             {
-                string jobId = booklets[0].job.ID;
+                string jobId = booklets[0].job?.ID ?? "";
+                if (string.IsNullOrEmpty(jobId))
+                    return new RouteManagerMessageState("Invalid job", new RouteManagerNewRouteState());
+
                 CommandArg[] args = fromLoco
                     ? new[] { new CommandArg { String = "loco" }, new CommandArg { String = jobId } }
                     : new[] { new CommandArg { String = "job" }, new CommandArg { String = jobId } };
@@ -177,7 +186,9 @@ namespace RevisedDVRoute.CommsRadio
         private static CommsRadioState BuildState(List<JobBooklet> booklets, int index)
         {
             int i = Mathf.Clamp(index, 0, booklets.Count);
-            string content = i < booklets.Count ? booklets[i].job.ID : "< Back";
+            string content = (i < booklets.Count && booklets[i]?.job != null)
+                ? booklets[i].job.ID
+                : (i < booklets.Count ? "Invalid Job" : "< Back");
             return new CommsRadioState("SELECT JOB", content, "SELECT",
                 LCDArrowState.Right, LEDState.Off, ButtonBehaviourType.Override);
         }
@@ -194,7 +205,9 @@ namespace RevisedDVRoute.CommsRadio
                 case InputAction.Activate:
                     if (_index >= _booklets.Count)
                         return new RouteManagerNewRouteState();
-                    string jobId = _booklets[_index].job.ID;
+                    string jobId = _booklets[_index]?.job?.ID;
+                    if (string.IsNullOrEmpty(jobId))
+                        return new RouteManagerMessageState("Invalid job", new RouteManagerNewRouteState());
                     CommandArg[] args = _fromLoco
                         ? new[] { new CommandArg { String = "loco" }, new CommandArg { String = jobId } }
                         : new[] { new CommandArg { String = "job" }, new CommandArg { String = jobId } };
@@ -441,7 +454,14 @@ namespace RevisedDVRoute.CommsRadio
                 default:
                     var route = Module.ActiveRoute.Route;
                     var tracker = Module.ActiveRoute.RouteTracker;
-                    if (tracker != null && tracker.IsWaitingForTurntable)
+                    TrainCar infoLoco = PlayerManager.LastLoco;
+                    LocoAI infoAi = Module.TryGetLocoAI(infoLoco);
+                    if (infoAi != null && !string.IsNullOrEmpty(infoAi.SignalHoldReason))
+                    {
+                        content = "WAIT: " + infoAi.SignalHoldReason;
+                        action = "CLEAR";
+                    }
+                    else if (tracker != null && tracker.IsWaitingForTurntable)
                     {
                         content = "WAIT: turntable rotating";
                         action = "CLEAR";
@@ -643,9 +663,15 @@ namespace RevisedDVRoute.CommsRadio
             if (PlayerManager.LastLoco == null)
                 return new RouteManagerMessageState("Board a locomotive first", new RouteManagerLocoAIMenuState());
 
-            var booklets = new System.Collections.Generic.List<JobBooklet>(JobBooklet.allExistingJobBooklets);
-            if (booklets.Count == 0)
+            if (JobBooklet.allExistingJobBooklets == null)
                 return new RouteManagerMessageState("No job booklets found", new RouteManagerLocoAIMenuState());
+
+            var booklets = JobBooklet.allExistingJobBooklets
+                .Where(b => b != null && b.job != null && b.job.tasks != null && b.job.tasks.Count > 0)
+                .ToList();
+
+            if (booklets.Count == 0)
+                return new RouteManagerMessageState("No active jobs found", new RouteManagerLocoAIMenuState());
             if (booklets.Count == 1)
                 return new RouteManagerFreightHaulDestSelectState(booklets[0].job);
             return new RouteManagerFreightHaulJobSelectState(booklets);
@@ -670,7 +696,9 @@ namespace RevisedDVRoute.CommsRadio
         private static CommsRadioState BuildState(List<JobBooklet> booklets, int index)
         {
             int i = Mathf.Clamp(index, 0, booklets.Count);
-            string content = i < booklets.Count ? booklets[i].job.ID : "< Back";
+            string content = (i < booklets.Count && booklets[i]?.job != null)
+                ? booklets[i].job.ID
+                : (i < booklets.Count ? "Invalid Job" : "< Back");
             return new CommsRadioState("SELECT JOB", content, "SELECT",
                 LCDArrowState.Right, LEDState.Off, ButtonBehaviourType.Override);
         }
@@ -687,6 +715,8 @@ namespace RevisedDVRoute.CommsRadio
                 case InputAction.Activate:
                     if (_index >= _booklets.Count)
                         return new RouteManagerLocoAIMenuState();
+                    if (_booklets[_index]?.job == null)
+                        return new RouteManagerMessageState("Invalid job", new RouteManagerLocoAIMenuState());
                     return new RouteManagerFreightHaulDestSelectState(_booklets[_index].job);
                 default:
                     return new RouteManagerFreightHaulJobSelectState(_booklets, _index);
@@ -722,11 +752,12 @@ namespace RevisedDVRoute.CommsRadio
         private static List<RouteTask> GetTasks(Job job)
         {
             var list = new List<RouteTask>();
+            if (job == null) return list;
             RouteTaskChain chain = RouteTaskChain.FromDVJob(job);
             while (chain != null)
             {
                 if (chain.tasks != null)
-                    list.AddRange(chain.tasks);
+                    list.AddRange(chain.tasks.Where(t => t != null));
                 chain = chain.nextTasks;
             }
             return list;
@@ -734,10 +765,15 @@ namespace RevisedDVRoute.CommsRadio
 
         private static CommsRadioState BuildState(Job job, List<RouteTask> tasks, int index)
         {
+            if (tasks == null || tasks.Count == 0)
+            {
+                return new CommsRadioState("SELECT DEST", "No Tasks Found", "BACK",
+                    LCDArrowState.Off, LEDState.Off, ButtonBehaviourType.Override);
+            }
             int total = tasks.Count + 1;
             int i = Mathf.Clamp(index, 0, total - 1);
             string content = i < tasks.Count
-                ? tasks[i].DestinationTrack?.ID?.FullID ?? "Unknown"
+                ? (tasks[i]?.DestinationTrack?.ID?.FullID ?? "Unknown Dest")
                 : "< Back";
             return new CommsRadioState("SELECT DEST", content, "SELECT",
                 LCDArrowState.Right, LEDState.Off, ButtonBehaviourType.Override);
@@ -753,8 +789,10 @@ namespace RevisedDVRoute.CommsRadio
                 case InputAction.Down:
                     return new RouteManagerFreightHaulDestSelectState(_job, _tasks, (_index - 1 + total) % total);
                 case InputAction.Activate:
-                    if (_index >= _tasks.Count)
+                    if (_tasks.Count == 0 || _index >= _tasks.Count)
                         return new RouteManagerLocoAIMenuState();
+                    if (_tasks[_index] == null)
+                        return new RouteManagerMessageState("Invalid task selected", new RouteManagerLocoAIMenuState());
                     return new RouteManagerFreightHaulStartState(_tasks[_index]);
                 default:
                     return new RouteManagerFreightHaulDestSelectState(_job, _tasks, _index);
@@ -768,12 +806,14 @@ namespace RevisedDVRoute.CommsRadio
     public class RouteManagerFreightHaulStartState : AStateBehaviour
     {
         private readonly RouteTask _task;
+        private readonly float _startTime;
 
         public RouteManagerFreightHaulStartState(RouteTask task)
-            : base(new CommsRadioState("LOCO AI", "Starting freight haul...", "WAIT",
+            : base(new CommsRadioState("LOCO AI", "Starting freight haul...", "CANCEL",
                 LCDArrowState.Off, LEDState.Off, ButtonBehaviourType.Override))
         {
             _task = task;
+            _startTime = Time.time;
             StartHaul();
         }
 
@@ -781,9 +821,15 @@ namespace RevisedDVRoute.CommsRadio
         {
             try
             {
+                if (_task == null)
+                {
+                    Module.mod.Logger.Log("StartFreightHaul error: task is null");
+                    return;
+                }
                 TrainCar loco = PlayerManager.LastLoco;
                 if (loco == null) return;
                 LocoAI ai = Module.GetLocoAI(loco);
+                if (ai == null) return;
                 ai.StartFreightHaul(_task, loco);
             }
             catch (Exception e)
@@ -795,21 +841,40 @@ namespace RevisedDVRoute.CommsRadio
         public override AStateBehaviour OnUpdate(CommsRadioUtility utility)
         {
             TrainCar loco = PlayerManager.LastLoco;
+            if (loco == null)
+                return new RouteManagerMessageState("No loco selected", new RouteManagerLocoAIMenuState());
+
             LocoAI ai = Module.TryGetLocoAI(loco);
-            if (ai != null && (ai.IsRunning || ai.IsFreightHaulActive))
+            if (ai == null)
+                return new RouteManagerMessageState("Loco AI unavailable", new RouteManagerLocoAIMenuState());
+
+            if (ai.FreightHaulState == LocoAI.HaulState.Failed)
+            {
+                string err = ai.FreightHaulError ?? "Haul start failed";
+                return new RouteManagerMessageState(err, new RouteManagerLocoAIMenuState());
+            }
+
+            if (ai.IsRunning || (ai.IsFreightHaulActive && ai.FreightHaulState != LocoAI.HaulState.Starting))
                 return new RouteManagerFreightHaulRunningState();
-            // Still starting up — wait one more tick
+
+            if (Time.time - _startTime > 5f)
+            {
+                string err = ai.FreightHaulError ?? "Timed out starting haul";
+                return new RouteManagerMessageState(err, new RouteManagerLocoAIMenuState());
+            }
+
+            // Still starting up — wait
             return this;
         }
 
         public override AStateBehaviour OnAction(CommsRadioUtility utility, InputAction action)
         {
-            if (action == InputAction.Down)
+            if (action == InputAction.Down || action == InputAction.Activate)
             {
                 Module.TryGetLocoAI(PlayerManager.LastLoco)?.StopAll();
                 return new RouteManagerLocoAIMenuState();
             }
-            return new RouteManagerMessageState("Freight haul is still starting", this);
+            return this;
         }
     }
 
@@ -824,10 +889,56 @@ namespace RevisedDVRoute.CommsRadio
 
         private static CommsRadioState BuildState()
         {
+            TrainCar loco = PlayerManager.LastLoco;
+            LocoAI ai = Module.TryGetLocoAI(loco);
             string status = "Running...";
-            var tracker = Module.ActiveRoute?.RouteTracker;
-            if (tracker != null)
-                status = $"To go: {(tracker.DistanceToFinish / 1000.0):0.0}km";
+
+            if (ai != null)
+            {
+                if (!string.IsNullOrEmpty(ai.SignalHoldReason))
+                {
+                    status = ai.SignalHoldReason;
+                }
+                else
+                {
+                    switch (ai.FreightHaulState)
+                    {
+                        case LocoAI.HaulState.RoutingToCars:
+                            status = "Routing to cars...";
+                            break;
+                        case LocoAI.HaulState.ApproachingCars:
+                            status = "Approaching cars...";
+                            break;
+                        case LocoAI.HaulState.Coupling:
+                            status = "Coupling cars...";
+                            break;
+                        case LocoAI.HaulState.RoutingToDestination:
+                            status = "Routing to dest...";
+                            break;
+                        case LocoAI.HaulState.DrivingToDestination:
+                            var tracker = Module.ActiveRoute?.RouteTracker;
+                            if (tracker != null)
+                                status = $"{(tracker.DistanceToFinish / 1000.0):0.0}km to go";
+                            else
+                                status = "Hauling to dest...";
+                            break;
+                        case LocoAI.HaulState.Uncoupling:
+                            status = "Uncoupling at dest...";
+                            break;
+                        default:
+                            if (ai.IsRunning)
+                            {
+                                var t = Module.ActiveRoute?.RouteTracker;
+                                if (t != null)
+                                    status = $"{(t.DistanceToFinish / 1000.0):0.0}km to go";
+                                else
+                                    status = "Driving...";
+                            }
+                            break;
+                    }
+                }
+            }
+
             return new CommsRadioState("LOCO AI", status, "STOP",
                 LCDArrowState.Off, LEDState.On, ButtonBehaviourType.Override);
         }
@@ -837,14 +948,25 @@ namespace RevisedDVRoute.CommsRadio
             TrainCar loco = PlayerManager.LastLoco;
             LocoAI ai = Module.TryGetLocoAI(loco);
             if (ai == null || (!ai.IsRunning && !ai.IsFreightHaulActive))
-                return new RouteManagerMessageState("Freight haul complete!", new RouteManagerLocoAIMenuState());
+            {
+                if (ai != null && ai.FreightHaulState == LocoAI.HaulState.Failed)
+                {
+                    string err = ai.FreightHaulError ?? "Haul failed";
+                    return new RouteManagerMessageState(err, new RouteManagerLocoAIMenuState());
+                }
+                if (ai != null && ai.FreightHaulState == LocoAI.HaulState.Completed)
+                {
+                    return new RouteManagerMessageState("Freight haul complete!", new RouteManagerLocoAIMenuState());
+                }
+                return new RouteManagerMessageState("AI stopped", new RouteManagerLocoAIMenuState());
+            }
             // Refresh display
             return new RouteManagerFreightHaulRunningState();
         }
 
         public override AStateBehaviour OnAction(CommsRadioUtility utility, InputAction action)
         {
-            if (action == InputAction.Activate)
+            if (action == InputAction.Activate || action == InputAction.Down)
             {
                 Module.TryGetLocoAI(PlayerManager.LastLoco)?.StopAll();
                 return new RouteManagerMessageState("AI stopped", new RouteManagerLocoAIMenuState());

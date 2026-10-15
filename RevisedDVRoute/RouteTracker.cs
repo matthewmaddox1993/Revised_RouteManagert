@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV;
 using DV.Logic.Job;
 using RevisedDVRoute.Extensions;
@@ -61,6 +61,12 @@ namespace RevisedDVRoute
 
         public double DistanceTraveled { get; set; } = 0.0;
 
+        /// <summary>The route-path occurrence currently occupied by the leading end.</summary>
+        public int CurrentPathIndex { get; private set; } = -1;
+
+        /// <summary>Physical metres remaining before the next route track begins.</summary>
+        public double DistanceToNextTrack { get; private set; }
+
         public double DistanceToFinish
         {
             get
@@ -81,6 +87,9 @@ namespace RevisedDVRoute
             Route = route;
             ElapsedTime = 0.0f;
             nextSwitchAlignmentTime = 0.0f;
+            DistanceTraveled = 0.0;
+            CurrentPathIndex = -1;
+            DistanceToNextTrack = 0.0;
 
             TrackState = TrackingState.BeforeStart;
 
@@ -128,43 +137,23 @@ namespace RevisedDVRoute
 
         protected void TakeTask()
         {
-            if (TaskChain.tasks.Count == 0)
+            // Sequential task chains are normally short, but walking them
+            // recursively can overflow the game thread if malformed job data
+            // contains a cycle or a very long run of completed task groups.
+            var visited = new HashSet<RouteTaskChain>();
+            while (TaskChain != null && visited.Add(TaskChain))
             {
-#if DEBUG
-                Terminal.Log($"Chain has no task, try to switch other chain");
-#endif
+                if (TaskChain.tasks != null && TaskChain.tasks.Count > 0)
+                {
+                    CurrentTask = TaskChain.tasks[0];
+                    return;
+                }
+
                 TaskChain = TaskChain.nextTasks;
-
-                if (TaskChain == null)
-                {
-                    CurrentTask = null;
-                    Terminal.Log($"No next chain");
-                    return;
-                }
-                else
-                {
-                    TakeTask();
-                    return;
-                }
-
             }
 
-            if (TaskChain.tasks.Count == 1)
-            {
-#if DEBUG
-                Terminal.Log($"Taking single avilable task");
-#endif
-                CurrentTask = TaskChain.tasks[0];
-            }
-            else
-            {
-#if DEBUG
-                Terminal.Log($"Multiple parallel tasks, taking first");
-#endif
-                CurrentTask = TaskChain.tasks[0];
-
-            }
-
+            CurrentTask = null;
+            Terminal.Log(TaskChain == null ? "No next chain" : "Cyclic task chain ignored");
         }
 
         protected class CarTrackPosition
@@ -298,7 +287,10 @@ namespace RevisedDVRoute
 #if DEBUG
                 yield return new WaitForSeconds(0.5f);
 #else
-                yield return new WaitForSeconds(0.1f);
+                // Five updates per second is faster than the AI control loop and
+                // avoids polling ADS/DV Signals plus rebuilding endpoint state at
+                // 10 Hz on Unity's main thread.
+                yield return new WaitForSeconds(0.2f);
 #endif
             }
 
@@ -347,7 +339,7 @@ namespace RevisedDVRoute
             if (pathData != null && Time.time >= nextSwitchAlignmentTime)
             {
                 Route.AdjustSwitchesAhead(pathData.pathIndex, posFromStart);
-                nextSwitchAlignmentTime = Time.time + 0.5f;
+                nextSwitchAlignmentTime = Time.time + 1.0f;
             }
 
             bool transitionAligned = pathData != null
@@ -355,6 +347,29 @@ namespace RevisedDVRoute
             bool headingMatches = pathData != null
                 && (pathData.nextTrack == null || !car.moving || pathData.nextTrack == car.trackNext);
             bool isOnTrack = transitionAligned && headingMatches;
+
+            if (isOnTrack)
+            {
+                CurrentPathIndex = pathData.pathIndex;
+                double trackLength = pathData.currentTrack.LogicTrack().length;
+                double distanceToNext = trackLength
+                    - Math.Min(trackLength, Math.Max(0.0, car.PosOnTrack));
+
+                // Before the train starts moving, CarTrackPosition has no
+                // previous/next sample from which to infer direction. Use the
+                // planned route transition so look-ahead braking starts with
+                // the correct distance on its very first update.
+                if (!car.moving && pathData.nextTrack != null)
+                {
+                    if (pathData.currentTrack.IsTrackOutBranch(pathData.nextTrack))
+                        distanceToNext = trackLength - car.Span;
+                    else if (pathData.currentTrack.IsTrackInBranch(pathData.nextTrack))
+                        distanceToNext = car.Span;
+                }
+
+                DistanceToNextTrack = Math.Max(0.0,
+                    Math.Min(trackLength, distanceToNext));
+            }
 
             if (transitionAligned && !car.moving && pathData != null
                 && pathData.currentTrack == car.track
@@ -421,7 +436,7 @@ namespace RevisedDVRoute
 
             if (TrackState == TrackingState.BeforeStart)
             {
-                if ( ! car.moving && (firstCar.track == Route.FirstTrack || lastCar.track == Route.FirstTrack))
+                if (!car.moving && (firstCar.track == Route.FirstTrack || lastCar.track == Route.FirstTrack || isOnTrack))
                 {
                     TrackState = TrackingState.OnStart;
                     Terminal.Log("Task tracking started");
@@ -430,7 +445,6 @@ namespace RevisedDVRoute
                 {
                     TrackState = TrackingState.RightHeading;
                 }
-                
             }
             else if (TrackState == TrackingState.OnStart)
             {

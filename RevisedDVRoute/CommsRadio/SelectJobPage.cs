@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV;
 using RevisedDVRoute.Internals;
 using System;
@@ -21,7 +21,9 @@ namespace RevisedDVRoute.CommsRadio
 
         protected override List<MenuItem> CreateMenuItems()
         {
-            List<JobBooklet> allJobBooklets = new List<JobBooklet>(JobBooklet.allExistingJobBooklets);
+            var allJobBooklets = JobBooklet.allExistingJobBooklets != null
+                ? JobBooklet.allExistingJobBooklets.Where(b => b != null && b.job != null).ToList()
+                : new List<JobBooklet>();
 
             var list = (allJobBooklets.Select(b =>
             {

@@ -55,27 +55,61 @@ namespace RevisedDVRoute
         /// <returns></returns>
         public static bool IsDirectLengthEnough(this RailTrack current, RailTrack from, double length)
         {
-            if (current.LogicTrack().length > length)
-                return true;
+            // Track graphs may contain loops and zero-length connector rails.
+            // The former recursive walk could therefore exhaust the game
+            // thread's call stack while the AI was planning a reversal.
+            var pending = new Stack<(RailTrack track, RailTrack previous, double remaining)>();
+            var bestRemaining = new Dictionary<(RailTrack track, RailTrack previous), double>();
+            pending.Push((current, from, length));
 
-            bool isFromInJuction = current.inIsConnected && current.GetAllInBranches().Any(b => b.track == from);
-            bool isFromOutJuction = current.outIsConnected && current.GetAllOutBranches().Any(b => b.track == from);
-
-            if (current.inIsConnected && !isFromInJuction)
+            while (pending.Count > 0)
             {
-                foreach (var branch in current.GetAllInBranches())
+                var state = pending.Pop();
+                RailTrack track = state.track;
+                if (track == null)
+                    continue;
+
+                Track logicTrack = track.LogicTrack();
+                if (logicTrack == null)
+                    continue;
+
+                double trackLength = Math.Max(0.0, logicTrack.length);
+                if (trackLength > state.remaining)
+                    return true;
+
+                var key = (track, state.previous);
+                double priorRemaining;
+                if (bestRemaining.TryGetValue(key, out priorRemaining)
+                    && priorRemaining <= state.remaining + 0.001)
                 {
-                    if (CanGoToDirectly(current, from, branch.track) && IsDirectLengthEnough(branch.track, current, length - current.LogicTrack().length))
-                        return true;
+                    continue;
                 }
-            }
+                bestRemaining[key] = state.remaining;
 
-            if (current.outIsConnected && !isFromOutJuction)
-            {
-                foreach (var branch in current.GetAllOutBranches())
+                double remaining = state.remaining - trackLength;
+                bool fromInJunction = track.inIsConnected
+                    && track.GetAllInBranches().Any(branch => branch.track == state.previous);
+                bool fromOutJunction = track.outIsConnected
+                    && track.GetAllOutBranches().Any(branch => branch.track == state.previous);
+
+                if (track.inIsConnected && !fromInJunction)
                 {
-                    if (CanGoToDirectly(current, from, branch.track) && IsDirectLengthEnough(branch.track, current, length - current.LogicTrack().length))
-                        return true;
+                    foreach (var branch in track.GetAllInBranches())
+                    {
+                        if (branch?.track != null
+                            && CanGoToDirectly(track, state.previous, branch.track))
+                            pending.Push((branch.track, track, remaining));
+                    }
+                }
+
+                if (track.outIsConnected && !fromOutJunction)
+                {
+                    foreach (var branch in track.GetAllOutBranches())
+                    {
+                        if (branch?.track != null
+                            && CanGoToDirectly(track, state.previous, branch.track))
+                            pending.Push((branch.track, track, remaining));
+                    }
                 }
             }
 

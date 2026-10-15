@@ -2,6 +2,41 @@
 
 All notable changes to Revised DV Route are recorded here.
 
+## 1.0.3 - 2026-10-15
+
+### ADS and DV Signals interoperability
+
+- Delegated signal authority only when ADS has an active, reserved route for the same consist, path, and native DV Signals head; merely loading the ADS signal adapter no longer disables Revised DV Route's rolling reservation.
+- Used DV Signals' host-authoritative request and release callbacks for player route reservations while the Multiplayer mod is active.
+- Treated the matching ADS-owned DV Signals reservation as the active route's authority instead of a foreign blocker.
+- Checked ADS conflicts with ADS track IDs, refreshed live route safety while locomotive automation is running, and included complete reserved signal-block footprints.
+- Preserved both protected and normal ADS route switch plans during automatic alignment, including explicit branch selection for multi-branch junctions.
+
+### Locomotive AI and direction handling
+
+- Reworked departure routing to use the consist's physical outer bogies instead of assuming `Bogies[0]` is the leading end.
+- Determined the forward end from the controlled locomotive's orientation and correctly accounted for front-versus-rear bogie track direction.
+- Removed the previous reverser position from route selection so a stale or neutral handle can no longer make the route start behind the train.
+- Selected the required reverser direction from the route's first transition, including routes which genuinely require backing out.
+- Changed the AI departure sequence to close the throttle, stop and secure the train if necessary, select the exact numeric reverser position, and only then release the brakes.
+- Replaced repeated blind reverser inputs with verified movement to the requested reverser position.
+- Added a one-reversal-per-manoeuvre latch so `WrongHeading` or `ReverseTrain` cannot cycle the reverser between forward and reverse while the locomotive is stopped.
+- Allowed the train to move after a reversal so RouteTracker can confirm the new heading before another reversal is permitted.
+
+### Signal stability
+
+- Stopped reclaiming a DV Signals reservation every two seconds after DV Signals invalidates it. Local reservation writes are suspended for the remainder of that route while foreign reservations continue to be respected.
+- Prevented the resulting reservation/aspect feedback loop from repeatedly recalculating the signal network and flooding `Player.log`.
+- Debounced locomotive-AI signal-clear messages for three seconds while applying the actual stop or resume command immediately.
+- Kept initial unavailable-block retries, normal block advancement, ADS authority delegation, and multiplayer host authority intact.
+
+### Gameplay performance
+
+- Cached expensive ADS signal-authority matching for 500 ms instead of rebuilding and comparing the complete reflected route state on every tracker update.
+- Reduced release RouteTracker polling from 10 Hz to 5 Hz; this remains faster than the locomotive AI's control cycle while halving endpoint, signal, and reservation polling work.
+- Kept live switch repair bounded by distance and time so long routes are not rescanned every frame.
+- Cached calculated track speed limits for locomotive automation and retained background route searches.
+
 ## 1.0.1a - 2026-10-14
 
 ### Hotfix

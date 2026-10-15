@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV;
 using RevisedDVRoute.Compatibility;
 using RevisedDVRoute.Internals;
@@ -54,7 +54,9 @@ namespace RevisedDVRoute.CommsRadio
         {
             this.fromLoco = fromLoco;
 
-            List<JobBooklet> allJobBooklets = new List<JobBooklet>(JobBooklet.allExistingJobBooklets);
+            var allJobBooklets = JobBooklet.allExistingJobBooklets != null
+                ? JobBooklet.allExistingJobBooklets.Where(b => b != null && b.job != null).ToList()
+                : new List<JobBooklet>();
 
             if (allJobBooklets.Count == 0)
             {

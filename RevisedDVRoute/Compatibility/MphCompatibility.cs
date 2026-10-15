@@ -12,7 +12,7 @@ namespace RevisedDVRoute.Compatibility
     internal static class MphCompatibility
     {
         private const string RevisedMphModId = "Revised_Mph";
-        private const float KilometresPerMile = 1.609344f;
+        public const float KilometresPerMile = 1.609344f;
         private static bool? lastLoggedActive;
 
         public static bool IsActive
@@ -27,6 +27,12 @@ namespace RevisedDVRoute.Compatibility
         }
 
         public static string DisplaySpeedUnit => IsActive ? "mph" : "km/h";
+
+        public static float SpeedToDisplay(float speedKph) => IsActive ? speedKph / KilometresPerMile : speedKph;
+
+        public static float DisplayToSpeedKph(float displaySpeed) => IsActive ? displaySpeed * KilometresPerMile : displaySpeed;
+
+        public static string FormatSpeed(float speedKph) => $"{Mathf.RoundToInt(SpeedToDisplay(speedKph))} {DisplaySpeedUnit}";
 
         /// <summary>
         /// Converts a physical km/h curve limit to Revised_Mph's nearest 5 mph

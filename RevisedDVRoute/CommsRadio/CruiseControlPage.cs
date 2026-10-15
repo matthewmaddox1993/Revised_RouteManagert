@@ -1,4 +1,4 @@
-﻿using CommandTerminal;
+using CommandTerminal;
 using DV;
 using RevisedDVRoute.Internals;
 using System;
@@ -40,7 +40,11 @@ namespace RevisedDVRoute.CommsRadio
 
             var menus = new List<MenuItem>();
 
-            string currentSpeedSet = LocoCruiseControl.GetTargetSpeed().HasValue ? $"\n\n\nSet to {LocoCruiseControl.GetTargetSpeed():0} km/h" : "\n\n\nSpeed not set";
+            bool isMph = Compatibility.MphCompatibility.IsActive;
+            float? targetSpeed = LocoCruiseControl.GetTargetSpeed();
+            string currentSpeedSet = targetSpeed.HasValue 
+                ? $"\n\n\nSet to {Compatibility.MphCompatibility.FormatSpeed(targetSpeed.Value)}" 
+                : "\n\n\nSpeed not set";
 
             int hash = 1;
             if ( ! LocoCruiseControl.IsSet)
@@ -49,13 +53,23 @@ namespace RevisedDVRoute.CommsRadio
                 hash += 2;
             }
 
-            menus.Add(new MenuItem("30 km/h" + currentSpeedSet, "Set", () => SetCruiseControl(30.0f)));
-            menus.Add(new MenuItem("60 km/h" + currentSpeedSet, "Set", () => SetCruiseControl(60.0f)));
+            if (isMph)
+            {
+                menus.Add(new MenuItem("20 mph" + currentSpeedSet, "Set", () => SetCruiseControl(Compatibility.MphCompatibility.DisplayToSpeedKph(20f))));
+                menus.Add(new MenuItem("40 mph" + currentSpeedSet, "Set", () => SetCruiseControl(Compatibility.MphCompatibility.DisplayToSpeedKph(40f))));
+            }
+            else
+            {
+                menus.Add(new MenuItem("30 km/h" + currentSpeedSet, "Set", () => SetCruiseControl(30.0f)));
+                menus.Add(new MenuItem("60 km/h" + currentSpeedSet, "Set", () => SetCruiseControl(60.0f)));
+            }
 
             if (LocoCruiseControl.IsSet)
             {
-                menus.Add(new MenuItem("+ 5 km/h" + currentSpeedSet, "Add", () => UpdateTargetSpeed(5.0f)));
-                menus.Add(new MenuItem("- 5 km/h" + currentSpeedSet, "Sub", () => UpdateTargetSpeed(-5.0f)));
+                float stepDiff = isMph ? Compatibility.MphCompatibility.DisplayToSpeedKph(5f) : 5.0f;
+                string unitLabel = isMph ? "mph" : "km/h";
+                menus.Add(new MenuItem($"+ 5 {unitLabel}" + currentSpeedSet, "Add", () => UpdateTargetSpeed(stepDiff)));
+                menus.Add(new MenuItem($"- 5 {unitLabel}" + currentSpeedSet, "Sub", () => UpdateTargetSpeed(-stepDiff)));
                 menus.Add(new MenuItem("Reset", "Cancel", () => ResetCruiseControl()));
                 hash += 4;
             }

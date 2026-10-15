@@ -16,7 +16,6 @@ namespace RevisedDVRoute.Compatibility
     internal static class ADSCompatibility
     {
         private const string ADSModId = "AdvancedDispatcherSystem";
-        private const string ADSSignalsAdapterTypeName = "AdvancedDispatcherSystem.Signals.Adapter";
         private const BindingFlags InstanceMembers = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         private const BindingFlags StaticMembers = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
 
@@ -27,10 +26,15 @@ namespace RevisedDVRoute.Compatibility
         private static FieldInfo statePlanField;
         private static FieldInfo stateIdField;
         private static FieldInfo stateLifecycleField;
+        private static FieldInfo stateReservationField;
+        private static FieldInfo stateSignalsField;
         private static FieldInfo stateReasonField;
         private static FieldInfo stateTimeField;
         private static FieldInfo planNameField;
         private static FieldInfo planTrainCarsField;
+        private static FieldInfo planTracksField;
+        private static FieldInfo planSwitchesField;
+        private static FieldInfo planReservedSignalsField;
         private static FieldInfo planWarningsField;
         private static FieldInfo planConflictsField;
         private static FieldInfo planReasonField;
@@ -47,6 +51,7 @@ namespace RevisedDVRoute.Compatibility
         private static FieldInfo conflictTrainField;
         private static FieldInfo dispatcherOccupancyStatesField;
         private static FieldInfo dispatcherSignalStatesField;
+        private static FieldInfo dispatcherBlockStatesField;
         private static FieldInfo dispatcherRouteLocksField;
         private static FieldInfo dispatcherJunctionIdsField;
         private static MethodInfo routeLocksTrackOwnerMethod;
@@ -60,10 +65,25 @@ namespace RevisedDVRoute.Compatibility
         private static FieldInfo signalStopField;
         private static FieldInfo signalAuthorityTrackField;
         private static FieldInfo signalTrackField;
+        private static FieldInfo blockReservedField;
+        private static FieldInfo blockTracksField;
+        private static FieldInfo blockExtraTracksField;
+        private static FieldInfo routeStepIdField;
+        private static FieldInfo routeStepBranchField;
+        private static MethodInfo protectedSwitchAllowedMethod;
         private static bool apiResolved;
-        private static bool signalsAdapterProbeComplete;
-        private static bool signalsAdapterAvailable;
         private static bool signalsDelegationLogged;
+        private static bool localSignalAuthorityLogged;
+        private static Route lastLiveSafetyRoute;
+        private static long lastLiveSafetyRefresh;
+        private const long AuthorityCacheMilliseconds = 500;
+        private static Route cachedAuthorityRoute;
+        private static long cachedAuthorityTime;
+        private static bool cachedAuthorityResult;
+        private static Route cachedSignalAuthorityRoute;
+        private static int cachedSignalAuthorityId = -1;
+        private static long cachedSignalAuthorityTime;
+        private static bool cachedSignalAuthorityResult;
         private static string lastLoggedError;
         private static string lastLoggedSwitchError;
         private static readonly HashSet<int> LoggedBlockedJunctions = new HashSet<int>();
@@ -85,34 +105,33 @@ namespace RevisedDVRoute.Compatibility
         }
 
         /// <summary>
-        /// ADS installs a DV Signals synchronization adapter that owns signal
-        /// reservation/aspect updates. When it is active, Revised DV Route must
-        /// remain a reader instead of creating a second reservation for the
-        /// same player route.
+        /// ADS owns DV Signals authority only when it has an active, reserved
+        /// route for this exact consist and path. Merely loading ADS's signal
+        /// adapter does not register a Revised DV Route path with ADS.
         /// </summary>
         internal static bool ManagesDVSignals
         {
             get
             {
-                UnityModManager.ModEntry adsMod = FindADSMod();
-                if (adsMod == null || !adsMod.Active)
-                    return false;
-
-                if (!signalsAdapterProbeComplete)
-                {
-                    signalsAdapterAvailable = AppDomain.CurrentDomain.GetAssemblies()
-                        .Any(assembly => assembly.GetType(ADSSignalsAdapterTypeName, false) != null);
-                    signalsAdapterProbeComplete = true;
-                }
-
-                if (signalsAdapterAvailable && !signalsDelegationLogged && Module.mod != null)
+                Route route = Module.ActiveRoute?.Route;
+                bool delegated = OwnsSignalAuthority(route, null);
+                if (delegated && !signalsDelegationLogged && Module.mod != null)
                 {
                     Module.mod.Logger.Log(
-                        "ADS signal synchronization detected: player DV Signals reservation authority delegated to ADS.");
+                        "ADS has a matching reserved route: DV Signals authority delegated for this route.");
                     signalsDelegationLogged = true;
+                    localSignalAuthorityLogged = false;
+                }
+                else if (!delegated && signalsDelegationLogged && !localSignalAuthorityLogged
+                    && route != null && Module.mod != null)
+                {
+                    Module.mod.Logger.Log(
+                        "ADS no longer owns the active route's signal reservation; Revised DV Route resumed rolling DV Signals authority.");
+                    localSignalAuthorityLogged = true;
+                    signalsDelegationLogged = false;
                 }
 
-                return signalsAdapterAvailable;
+                return delegated;
             }
         }
         private static string[] Warnings { get; set; } = new string[0];
@@ -124,6 +143,86 @@ namespace RevisedDVRoute.Compatibility
         private static string MatchedRouteId { get; set; }
         internal static string BlockingReason { get; private set; }
         internal static bool LastRouteRejected { get; private set; }
+
+        internal static bool IsTrackBlockedAhead(RailTrack track)
+        {
+            if (track == null || BlockingTrackIds == null || !EnsureApi()) return false;
+
+            try
+            {
+                object dispatcher = runtimeField?.GetValue(null);
+                string trackId = dispatcher == null || trackIdMethod == null
+                    ? null
+                    : Convert.ToString(trackIdMethod.Invoke(dispatcher, new object[] { track }));
+                return !string.IsNullOrWhiteSpace(trackId)
+                    && BlockingTrackIds.Any(id => string.Equals(id, trackId,
+                        StringComparison.OrdinalIgnoreCase));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Refreshes the active path's ADS conflict ids at a bounded rate for
+        /// locomotive automation. Route planning performs its own immediate
+        /// check; this closes the gap when traffic changes after activation.
+        /// </summary>
+        internal static void RefreshActiveRouteSafety(Route route)
+        {
+            if (route?.Path == null || route.Path.Count == 0)
+                return;
+
+            long now = UtcNowMilliseconds();
+            if (ReferenceEquals(lastLiveSafetyRoute, route)
+                && now - lastLiveSafetyRefresh >= 0
+                && now - lastLiveSafetyRefresh < 500)
+                return;
+
+            lastLiveSafetyRoute = route;
+            lastLiveSafetyRefresh = now;
+            UnityModManager.ModEntry adsMod = FindADSMod();
+            if (adsMod == null || !adsMod.Active || !EnsureApi())
+                return;
+
+            List<RailTrack> path = route.Path.Where(track => track != null).ToList();
+            RefreshStatus(route.Trainset, path);
+            if (!apiResolved || runtimeField == null || trackIdMethod == null)
+                return;
+
+            try
+            {
+                object dispatcher = runtimeField.GetValue(null);
+                if (dispatcher == null)
+                    return;
+
+                var pathIds = path.Select(track => Convert.ToString(
+                        trackIdMethod.Invoke(dispatcher, new object[] { track })))
+                    .ToList();
+                var blocked = new HashSet<string>(BlockingTrackIds ?? new string[0],
+                    StringComparer.OrdinalIgnoreCase);
+                var nonReroutable = new HashSet<string>(
+                    NonReroutableTrackIds ?? new string[0], StringComparer.OrdinalIgnoreCase);
+                int occupied;
+                int reserved;
+                int signals;
+                AddLiveBlockingTrackIds(dispatcher, pathIds,
+                    GetTrainCarIds(route.Trainset), MatchedRouteId, !HasMatchingRoute,
+                    blocked, nonReroutable, out occupied, out reserved, out signals);
+                BlockingTrackIds = blocked.ToArray();
+                NonReroutableTrackIds = nonReroutable.ToArray();
+            }
+            catch (Exception exception)
+            {
+                string message = exception.GetBaseException().Message;
+                if (lastLoggedError != message)
+                {
+                    lastLoggedError = message;
+                    Module.mod?.Logger.Log("ADS live route-safety refresh failed: " + message);
+                }
+            }
+        }
 
         /// <summary>
         /// True when the last rejection was based only on signal state or a
@@ -156,10 +255,188 @@ namespace RevisedDVRoute.Compatibility
 
         internal static void BeginRouteAttempt()
         {
+            InvalidateAuthorityCache();
             LastRouteRejected = false;
             LastBlockIsSoft = false;
             LastRouteCheckPerformed = false;
             LastRouteCheckNotice = null;
+        }
+
+        /// <summary>
+        /// Returns true only when ADS has accepted signal ownership for this
+        /// exact consist and route. An optional signal id further verifies that
+        /// ADS owns the same native DV Signals head before local bookkeeping is
+        /// detached from it.
+        /// </summary>
+        internal static bool OwnsSignalAuthority(Route route, int? signalId)
+        {
+            long now = UtcNowMilliseconds();
+            if (!signalId.HasValue)
+            {
+                if (ReferenceEquals(cachedAuthorityRoute, route)
+                    && now - cachedAuthorityTime >= 0
+                    && now - cachedAuthorityTime < AuthorityCacheMilliseconds)
+                    return cachedAuthorityResult;
+            }
+            else if (ReferenceEquals(cachedSignalAuthorityRoute, route)
+                && cachedSignalAuthorityId == signalId.Value
+                && now - cachedSignalAuthorityTime >= 0
+                && now - cachedSignalAuthorityTime < AuthorityCacheMilliseconds)
+            {
+                return cachedSignalAuthorityResult;
+            }
+
+            bool result = EvaluateSignalAuthority(route, signalId);
+            if (!signalId.HasValue)
+            {
+                cachedAuthorityRoute = route;
+                cachedAuthorityTime = now;
+                cachedAuthorityResult = result;
+            }
+            else
+            {
+                cachedSignalAuthorityRoute = route;
+                cachedSignalAuthorityId = signalId.Value;
+                cachedSignalAuthorityTime = now;
+                cachedSignalAuthorityResult = result;
+            }
+
+            return result;
+        }
+
+        private static bool EvaluateSignalAuthority(Route route, int? signalId)
+        {
+            UnityModManager.ModEntry adsMod = FindADSMod();
+            if (adsMod == null || !adsMod.Active || route?.Path == null
+                || route.Path.Count == 0 || route.Trainset == null || !EnsureApi()
+                || stateReservationField == null || planTracksField == null)
+                return false;
+
+            try
+            {
+                object dispatcher = runtimeField.GetValue(null);
+                if (dispatcher == null || trackIdMethod == null || routeStatesMethod == null)
+                    return false;
+
+                string[] localPath = route.Path.Where(track => track != null)
+                    .Select(track => Convert.ToString(trackIdMethod.Invoke(dispatcher,
+                        new object[] { track })))
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToArray();
+                if (localPath.Length != route.Path.Count)
+                    return false;
+
+                var localCars = new HashSet<string>(GetTrainCarIds(route.Trainset),
+                    StringComparer.OrdinalIgnoreCase);
+                if (localCars.Count == 0)
+                    return false;
+
+                IEnumerable states = routeStatesMethod.Invoke(dispatcher, null) as IEnumerable;
+                if (states == null)
+                    return false;
+
+                foreach (object state in states)
+                {
+                    if (state == null
+                        || !string.Equals(ReadFieldString(stateLifecycleField, state), "active",
+                            StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(ReadFieldString(stateReservationField, state), "reserved",
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    object plan = statePlanField?.GetValue(state);
+                    if (plan == null || !FieldsEqualSet(planTrainCarsField, plan, localCars))
+                        continue;
+
+                    string[] adsPath = ReadStringArray(planTracksField, plan);
+                    if (!IsContiguousRouteSuffix(adsPath, localPath))
+                        continue;
+
+                    string[] signals = ReadStringArray(stateSignalsField, state);
+                    if (signals.Length == 0)
+                        signals = ReadStringArray(planReservedSignalsField, plan);
+                    if (signals.Length == 0)
+                        continue;
+
+                    if (!signalId.HasValue || signals.Any(id =>
+                        string.Equals(id, "s" + signalId.Value, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(id, signalId.Value.ToString(), StringComparison.OrdinalIgnoreCase)))
+                        return true;
+                }
+            }
+            catch (Exception exception)
+            {
+                string message = exception.GetBaseException().Message;
+                if (lastLoggedError != message)
+                {
+                    lastLoggedError = message;
+                    Module.mod?.Logger.Log("ADS signal-authority check failed open: " + message);
+                }
+            }
+
+            return false;
+        }
+
+        private static void InvalidateAuthorityCache()
+        {
+            cachedAuthorityRoute = null;
+            cachedAuthorityTime = 0;
+            cachedAuthorityResult = false;
+            cachedSignalAuthorityRoute = null;
+            cachedSignalAuthorityId = -1;
+            cachedSignalAuthorityTime = 0;
+            cachedSignalAuthorityResult = false;
+        }
+
+        private static bool FieldsEqualSet(FieldInfo field, object owner,
+            HashSet<string> expected)
+        {
+            string[] values = ReadStringArray(field, owner);
+            return values.Length == expected.Count && expected.SetEquals(values);
+        }
+
+        private static string[] ReadStringArray(FieldInfo field, object owner)
+        {
+            IEnumerable values = field?.GetValue(owner) as IEnumerable;
+            if (values == null)
+                return new string[0];
+
+            var result = new List<string>();
+            foreach (object value in values)
+            {
+                string text = Convert.ToString(value);
+                if (!string.IsNullOrWhiteSpace(text))
+                    result.Add(text);
+            }
+            return result.ToArray();
+        }
+
+        private static bool IsContiguousRouteSuffix(IList<string> adsPath,
+            IList<string> localPath)
+        {
+            if (adsPath == null || localPath == null || localPath.Count == 0
+                || localPath.Count > adsPath.Count
+                || !string.Equals(adsPath[adsPath.Count - 1], localPath[localPath.Count - 1],
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            for (int start = 0; start <= adsPath.Count - localPath.Count; start++)
+            {
+                bool matches = true;
+                for (int index = 0; index < localPath.Count; index++)
+                {
+                    if (string.Equals(adsPath[start + index], localPath[index],
+                        StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    matches = false;
+                    break;
+                }
+
+                if (matches)
+                    return start + localPath.Count == adsPath.Count;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -481,26 +758,45 @@ namespace RevisedDVRoute.Compatibility
                 if (dispatcher == null)
                     return true;
 
+                bool protectedAllowed = protectedSwitchAllowedMethod == null
+                    || Convert.ToBoolean(protectedSwitchAllowedMethod.Invoke(null,
+                        new object[] { junction, branch }));
+
                 object routeLocks = dispatcherRouteLocksField?.GetValue(dispatcher);
                 IDictionary junctionIds = dispatcherJunctionIdsField?.GetValue(dispatcher) as IDictionary;
                 if (routeLocks == null || junctionIds == null
                     || routeLocksAllowsSwitchMethod == null || !junctionIds.Contains(junction))
-                    return true;
+                    return protectedAllowed;
 
                 string junctionId = Convert.ToString(junctionIds[junction]);
                 if (string.IsNullOrWhiteSpace(junctionId))
                     return true;
 
-                bool allowed = Convert.ToBoolean(routeLocksAllowsSwitchMethod.Invoke(routeLocks,
-                    new object[] { junctionId, branch }));
-                if (!allowed && routeLocksSwitchOwnerMethod != null)
+                bool allowed = protectedAllowed && Convert.ToBoolean(
+                    routeLocksAllowsSwitchMethod.Invoke(routeLocks,
+                        new object[] { junctionId, branch }));
+                if (routeLocksSwitchOwnerMethod != null)
                 {
                     routeOwner = Convert.ToString(routeLocksSwitchOwnerMethod.Invoke(routeLocks,
                         new object[] { junctionId }));
+
+                    // ADS intentionally permits manual changes through normal
+                    // reservations, then invalidates the route as misaligned.
+                    // Automatic Route Manager alignment should be more
+                    // cooperative: preserve any active ADS route that requires
+                    // a different branch, regardless of reservation mode.
+                    int requiredBranch;
+                    if (allowed && !string.IsNullOrWhiteSpace(routeOwner)
+                        && TryGetADSRouteSwitchBranch(dispatcher, routeOwner,
+                            junctionId, out requiredBranch)
+                        && requiredBranch != branch)
+                        allowed = false;
                 }
-                else if (allowed)
+
+                if (allowed)
                 {
                     LoggedBlockedJunctions.Remove(junction.GetInstanceID());
+                    routeOwner = null;
                 }
 
                 lastLoggedSwitchError = null;
@@ -518,6 +814,51 @@ namespace RevisedDVRoute.Compatibility
             }
         }
 
+        private static bool TryGetADSRouteSwitchBranch(object dispatcher,
+            string routeId, string junctionId, out int branch)
+        {
+            branch = -1;
+            if (dispatcher == null || string.IsNullOrWhiteSpace(routeId)
+                || string.IsNullOrWhiteSpace(junctionId) || routeStatesMethod == null
+                || planSwitchesField == null || routeStepIdField == null
+                || routeStepBranchField == null)
+                return false;
+
+            IEnumerable states = routeStatesMethod.Invoke(dispatcher, null) as IEnumerable;
+            if (states == null)
+                return false;
+
+            foreach (object state in states)
+            {
+                if (state == null
+                    || !string.Equals(ReadFieldString(stateIdField, state), routeId,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(ReadFieldString(stateLifecycleField, state), "active",
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                object plan = statePlanField?.GetValue(state);
+                if (plan == null)
+                    return false;
+                IEnumerable steps = planSwitchesField.GetValue(plan) as IEnumerable;
+                if (steps == null)
+                    return false;
+
+                foreach (object step in steps)
+                {
+                    if (step == null || !string.Equals(
+                        Convert.ToString(routeStepIdField.GetValue(step)), junctionId,
+                        StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    branch = Convert.ToInt32(routeStepBranchField.GetValue(step));
+                    return true;
+                }
+                return false;
+            }
+
+            return false;
+        }
+
         internal static void LogBlockedJunctionSwitch(Junction junction, string routeOwner)
         {
             if (junction != null && !LoggedBlockedJunctions.Add(junction.GetInstanceID()))
@@ -528,8 +869,8 @@ namespace RevisedDVRoute.Compatibility
                 junctionName = junction?.name ?? "unknown junction";
 
             string owner = string.IsNullOrWhiteSpace(routeOwner)
-                ? "an ADS protected route"
-                : "ADS protected route " + routeOwner;
+                ? "an ADS route"
+                : "ADS route " + routeOwner;
             string message = owner + " locks " + junctionName + "; automatic switch skipped.";
             Terminal.Log(message);
             Module.mod?.Logger.Log(message);
@@ -656,6 +997,28 @@ namespace RevisedDVRoute.Compatibility
                 }
             }
 
+            // ADS exposes each DV Signals block's complete native footprint.
+            // Prefer that over the signal mast/authority track so junction
+            // flanks and ExtraTracks are not missed by the conflict check.
+            IDictionary blocks = dispatcherBlockStatesField?.GetValue(dispatcher) as IDictionary;
+            if (includeSignalReservations && blocks != null && blockReservedField != null)
+            {
+                stateAvailable = true;
+                foreach (object value in blocks.Values)
+                {
+                    if (value == null || !Convert.ToBoolean(blockReservedField.GetValue(value)))
+                        continue;
+
+                    foreach (string protectedTrack in ReadStrings(
+                        blockTracksField?.GetValue(value), blockExtraTracksField?.GetValue(value)))
+                    {
+                        if (pathIdSet.Contains(protectedTrack)
+                            && !IsEndpointOnly(pathIds, protectedTrack))
+                            signalIds.Add(protectedTrack);
+                    }
+                }
+            }
+
             foreach (string id in occupiedIds)
             {
                 blockedIds.Add(id);
@@ -673,6 +1036,22 @@ namespace RevisedDVRoute.Compatibility
             reservedBlockers = reservedIds.Count;
             signalBlockers = signalIds.Count;
             return stateAvailable;
+        }
+
+        private static IEnumerable<string> ReadStrings(params object[] sources)
+        {
+            foreach (object source in sources)
+            {
+                IEnumerable values = source as IEnumerable;
+                if (values == null)
+                    continue;
+                foreach (object value in values)
+                {
+                    string text = Convert.ToString(value);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        yield return text;
+                }
+            }
         }
 
         private static bool IsEndpointOnly(IList<string> pathIds, string trackId)
@@ -857,6 +1236,8 @@ namespace RevisedDVRoute.Compatibility
             routeStatesMethod = dispatcherType.GetMethod("RouteStates", InstanceMembers);
             trackIdMethod = dispatcherType.GetMethod("TrackId", InstanceMembers, null,
                 new[] { typeof(RailTrack) }, null);
+            protectedSwitchAllowedMethod = dispatcherType.GetMethod("ProtectedSwitchAllowed",
+                StaticMembers, null, new[] { typeof(Junction), typeof(int) }, null);
             if (runtimeStatusProperty == null || routeStatesMethod == null || trackIdMethod == null)
                 return false;
 
@@ -864,11 +1245,16 @@ namespace RevisedDVRoute.Compatibility
             statePlanField = routeStateType?.GetField("plan", InstanceMembers);
             stateIdField = routeStateType?.GetField("id", InstanceMembers);
             stateLifecycleField = routeStateType?.GetField("lifecycle", InstanceMembers);
+            stateReservationField = routeStateType?.GetField("reservation", InstanceMembers);
+            stateSignalsField = routeStateType?.GetField("signals", InstanceMembers);
             stateReasonField = routeStateType?.GetField("reason", InstanceMembers);
             stateTimeField = routeStateType?.GetField("time", InstanceMembers);
             Type planType = statePlanField?.FieldType;
             planNameField = planType?.GetField("name", InstanceMembers);
             planTrainCarsField = planType?.GetField("trainCars", InstanceMembers);
+            planTracksField = planType?.GetField("tracks", InstanceMembers);
+            planSwitchesField = planType?.GetField("switches", InstanceMembers);
+            planReservedSignalsField = planType?.GetField("reservedSignals", InstanceMembers);
             planWarningsField = planType?.GetField("warnings", InstanceMembers);
             planConflictsField = planType?.GetField("conflicts", InstanceMembers);
             planReasonField = planType?.GetField("reason", InstanceMembers);
@@ -890,6 +1276,7 @@ namespace RevisedDVRoute.Compatibility
             // real path safety check before any ADS route record exists.
             dispatcherOccupancyStatesField = dispatcherType.GetField("occupancyStates", InstanceMembers);
             dispatcherSignalStatesField = dispatcherType.GetField("signalStates", InstanceMembers);
+            dispatcherBlockStatesField = dispatcherType.GetField("blockStates", InstanceMembers);
             dispatcherRouteLocksField = dispatcherType.GetField("routeLocks", InstanceMembers);
             dispatcherJunctionIdsField = dispatcherType.GetField("junctionIds", InstanceMembers);
 
@@ -904,6 +1291,15 @@ namespace RevisedDVRoute.Compatibility
             signalStopField = signalType?.GetField("stop", InstanceMembers);
             signalAuthorityTrackField = signalType?.GetField("authorityTrack", InstanceMembers);
             signalTrackField = signalType?.GetField("track", InstanceMembers);
+
+            Type blockType = DictionaryValueType(dispatcherBlockStatesField?.FieldType);
+            blockReservedField = blockType?.GetField("reserved", InstanceMembers);
+            blockTracksField = blockType?.GetField("tracks", InstanceMembers);
+            blockExtraTracksField = blockType?.GetField("extraTracks", InstanceMembers);
+
+            Type routeStepType = planSwitchesField?.FieldType.GetElementType();
+            routeStepIdField = routeStepType?.GetField("id", InstanceMembers);
+            routeStepBranchField = routeStepType?.GetField("branch", InstanceMembers);
 
             Type routeLocksType = dispatcherRouteLocksField?.FieldType;
             routeLocksTrackOwnerMethod = routeLocksType?.GetMethod("TrackOwner", InstanceMembers,

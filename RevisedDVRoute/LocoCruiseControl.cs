@@ -44,6 +44,15 @@ namespace RevisedDVRoute
 
         // ────────────────────────────────────────────────────────────────────
 
+        protected BaseControlsOverrider controlsOverrider;
+        protected SimController simController;
+
+        private float _lastThermalLogTime = -999f;
+        private float _sandHoldUntilTime = -999f;
+        private float _slipCooldownUntilTime = -999f;
+        private bool _sanderActive = false;
+        private float _lastThrottleStepTime = -999f;
+
         public LocoCruiseControl(ILocomotiveRemoteControl remoteControl, TrainCar car = null)
         {
             this.remoteControl = remoteControl;
@@ -51,15 +60,22 @@ namespace RevisedDVRoute
 
             if (car != null)
             {
-                _isDM3        = car.carLivery?.parentType?.id == LOCO_DM3;
-                _indicators   = car.GetComponentInChildren<LocoIndicatorReader>();
-                // Interior controls loaded lazily (may be null until player enters cab)
+                simController     = car.GetComponent<SimController>();
+                controlsOverrider = simController?.controlsOverrider ?? car.GetComponentInChildren<BaseControlsOverrider>();
+                _isDM3            = car.carLivery?.parentType?.id == LOCO_DM3;
+                _indicators       = car.GetComponentInChildren<LocoIndicatorReader>();
+            }
+
+            if (controlsOverrider == null && remoteControl is ControlsOverriderRemote cor)
+            {
+                controlsOverrider = cor.ControlsOverrider;
             }
         }
 
         public bool StartCruiseControl(float targetSpeed)
         {
             this.TargetSpeed = targetSpeed;
+            ResetControllerState();
             running = true;
             Module.StartCoroutine(CruiseControlCoroutine());
             return true;
@@ -70,8 +86,173 @@ namespace RevisedDVRoute
         private const float Kd_SPEED             = 7f;
         private const float Kp_SPEED_RETURN_FACTOR = 1.5f;
 
+        private const float BRAKE_DEADBAND_KPH = 0.75f;
+        private const float BRAKE_RELEASE_EPSILON = 0.01f;
+        private const float LOW_SPEED_KPH = 6.0f;
+
+        public enum ThermalProtectionLevel
+        {
+            Normal,
+            Warning,
+            Critical
+        }
+
+        protected float GetMaxConsistAmps()
+        {
+            float maxAmps = 0f;
+            if (trainCar?.trainset?.cars != null)
+            {
+                for (int i = 0; i < trainCar.trainset.cars.Count; i++)
+                {
+                    TrainCar c = trainCar.trainset.cars[i];
+                    if (c == null || !c.IsLoco) continue;
+                    LocoIndicatorReader ind = c.GetComponentInChildren<LocoIndicatorReader>();
+                    if (ind?.amps != null && ind.amps.Value > maxAmps)
+                        maxAmps = ind.amps.Value;
+                }
+            }
+            else if (_indicators?.amps != null)
+            {
+                maxAmps = _indicators.amps.Value;
+            }
+            return maxAmps;
+        }
+
+        protected float GetConsistAmpCautionThreshold()
+        {
+            string typeId = trainCar?.carLivery?.parentType?.id ?? "";
+            if (typeId.IndexOf("DE2", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 520f;
+            return 750f;
+        }
+
+        protected void MoveDynamicBrakeTowards(float target)
+        {
+            if (controlsOverrider?.DynamicBrake != null)
+            {
+                float current = controlsOverrider.DynamicBrake.Value;
+                float difference = Mathf.Clamp01(target) - current;
+                if (Mathf.Abs(difference) > 0.02f)
+                {
+                    float step = Mathf.Sign(difference) * Mathf.Min(Mathf.Abs(difference), 0.20f);
+                    controlsOverrider.DynamicBrake.Set(Mathf.Clamp01(current + step));
+                }
+            }
+        }
+
+        protected void UpdateSmartSanding(bool slipping, float speed, bool braking)
+        {
+            if (slipping)
+            {
+                _sandHoldUntilTime = Time.time + 4.0f;
+                _slipCooldownUntilTime = Time.time + 2.5f;
+                remoteControl.UpdateThrottle(-0.25f);
+            }
+            else if (speed < 12.0f && remoteControl.GetTargetThrottle() > 0.15f)
+            {
+                _sandHoldUntilTime = Mathf.Max(_sandHoldUntilTime, Time.time + 2.5f);
+            }
+            else if (braking && remoteControl.GetTargetBrake() > 0.35f && speed > 5.0f)
+            {
+                _sandHoldUntilTime = Mathf.Max(_sandHoldUntilTime, Time.time + 2.0f);
+            }
+
+            bool shouldSand = Time.time < _sandHoldUntilTime || slipping;
+            if (shouldSand != _sanderActive)
+            {
+                _sanderActive = shouldSand;
+                remoteControl.UpdateSand(shouldSand ? ToggleDirection.UP : ToggleDirection.DOWN);
+                if (controlsOverrider?.Sander != null)
+                    controlsOverrider.Sander.Set(shouldSand ? 1f : 0f);
+            }
+        }
+
+        protected ThermalProtectionLevel CheckThermalState(out string thermalDetail)
+        {
+            thermalDetail = "";
+            ThermalProtectionLevel level = ThermalProtectionLevel.Normal;
+
+            // 1. Check MultipleUnitStateObserver across the entire MU chain (includeMUConnections = true)
+            var muTempState = remoteControl.GetEngineTemperatureState(true);
+            if (muTempState.HasFlag(MultipleUnitStateObserver.TemperatureState.Critical))
+            {
+                level = ThermalProtectionLevel.Critical;
+                thermalDetail = "MU Engine Temp CRITICAL";
+            }
+            else if (muTempState.HasFlag(MultipleUnitStateObserver.TemperatureState.Warning))
+            {
+                level = ThermalProtectionLevel.Warning;
+                thermalDetail = "MU Engine Temp WARNING";
+            }
+
+            // 2. Check all locomotives in the trainset for Traction Motor and Oil overheating
+            if (trainCar?.trainset?.cars != null)
+            {
+                foreach (TrainCar c in trainCar.trainset.cars)
+                {
+                    if (c == null || !c.IsLoco) continue;
+
+                    LocoIndicatorReader ind = c.GetComponentInChildren<LocoIndicatorReader>();
+                    if (ind == null) continue;
+
+                    string locoName = c.carLivery?.id ?? c.logicCar?.ID ?? "Loco";
+
+                    // Traction Motor Temperature (DE2, DE6, etc.)
+                    float tmT = ind.tmTemp?.Value ?? 0f;
+                    if (tmT >= 105f)
+                    {
+                        level = ThermalProtectionLevel.Critical;
+                        thermalDetail = $"{locoName} TM Overheat CRITICAL ({tmT:0}°C)";
+                        break;
+                    }
+                    else if (tmT >= 95f && level < ThermalProtectionLevel.Warning)
+                    {
+                        level = ThermalProtectionLevel.Warning;
+                        thermalDetail = $"{locoName} TM Temp Warning ({tmT:0}°C)";
+                    }
+
+                    // Transmission Oil Temperature (DH4, etc.)
+                    float oilT = ind.oilTemp?.Value ?? 0f;
+                    if (oilT >= 110f)
+                    {
+                        level = ThermalProtectionLevel.Critical;
+                        thermalDetail = $"{locoName} Oil Temp CRITICAL ({oilT:0}°C)";
+                        break;
+                    }
+                    else if (oilT >= 100f && level < ThermalProtectionLevel.Warning)
+                    {
+                        level = ThermalProtectionLevel.Warning;
+                        thermalDetail = $"{locoName} Oil Temp Warning ({oilT:0}°C)";
+                    }
+
+                    // Amperage Redline Protection (DE2 > 750A, DE6 > 950A)
+                    float amps = ind.amps?.Value ?? 0f;
+                    string typeId = c.carLivery?.parentType?.id ?? "";
+                    float ampRedline = typeId.IndexOf("DE2", StringComparison.OrdinalIgnoreCase) >= 0 ? 750f : 950f;
+                    if (amps > ampRedline && level < ThermalProtectionLevel.Warning)
+                    {
+                        level = ThermalProtectionLevel.Warning;
+                        thermalDetail = $"{locoName} Current Redline ({amps:0}A)";
+                    }
+                }
+            }
+
+            return level;
+        }
+
         float integral      = 0;
         float previousError = 0;
+
+        protected void ResetControllerState()
+        {
+            integral = 0f;
+            previousError = 0f;
+            _awaitingShift = false;
+            _pendingShiftDir = 0;
+            _sandHoldUntilTime = -999f;
+            _slipCooldownUntilTime = -999f;
+            _lastThrottleStepTime = -999f;
+        }
 
         // ── Main speed controller ────────────────────────────────────────────
         //https://en.wikipedia.org/wiki/PID_controller
@@ -88,16 +269,20 @@ namespace RevisedDVRoute
             {
                 if (TargetSpeed > DM3_MAX_SPEED)
                     TargetSpeed = DM3_MAX_SPEED;
-                if (HandleDM3GearShift(dt))
+
+                // A queued gear change must never delay braking for a lower
+                // speed limit. Shifting is only useful while holding or
+                // increasing speed.
+                if (TargetSpeed >= speed - BRAKE_DEADBAND_KPH && HandleDM3GearShift(dt))
                     return targetAcceleration; // PID skipped during shift
             }
 
-            // ── Temperature: back off throttle when overheating ──────────────
-            var tempState = remoteControl.GetEngineTemperatureState(false);
-            bool tempCritical = tempState.HasFlag(MultipleUnitStateObserver.TemperatureState.Critical);
-            bool tempWarning  = tempState.HasFlag(MultipleUnitStateObserver.TemperatureState.Warning);
+            // ── Temperature & TM Protection ──────────────────────────────────
+            string thermalReason;
+            ThermalProtectionLevel thermalLevel = CheckThermalState(out thermalReason);
 
             // ── PID ──────────────────────────────────────────────────────────
+            dt = Mathf.Max(dt, 0.01f);
             float error = TargetSpeed - speed;
             integral += error * dt;
 
@@ -112,10 +297,6 @@ namespace RevisedDVRoute
 
             previousError = error;
 
-#if DEBUG2
-            Terminal.Log($"targetSpeed {TargetSpeed} error {error} accel {acceleration} controlValue {controlValue} throttle {remoteControl.GetTargetThrottle()} temp {tempState}");
-#endif
-
             if (controlValue > 20.0f)
                 controlValue = 20.0f;
 
@@ -125,30 +306,196 @@ namespace RevisedDVRoute
             if (TargetSpeed < Mathf.Epsilon)
                 controlValue = -10f;
 
-            // Temperature limiting: Critical → force reduce; Warning → no increase
-            if (tempCritical)
+            // Thermal Limiting:
+            // Critical → immediately cut throttle to idle, disallow any power
+            if (thermalLevel == ThermalProtectionLevel.Critical)
             {
-                controlValue = Mathf.Min(controlValue, -5f);
+                controlValue = -25f;
+                remoteControl.UpdateThrottle(-100f);
+                if (Time.time - _lastThermalLogTime > 5f)
+                {
+                    _lastThermalLogTime = Time.time;
+                    Terminal.Log($"[Thermal Protection] {thermalReason} - Throttle cut to idle.");
+                    Module.mod?.Logger.Log($"[Thermal Protection] {thermalReason} - Throttle cut to idle.");
+                }
             }
-            else if (tempWarning)
+            else if (thermalLevel == ThermalProtectionLevel.Warning)
             {
-                controlValue = Mathf.Min(controlValue, 0f);
+                controlValue = Mathf.Min(controlValue, -2f);
+                if (remoteControl.GetTargetThrottle() > 0.35f)
+                    remoteControl.UpdateThrottle(-0.5f);
+
+                if (Time.time - _lastThermalLogTime > 10f)
+                {
+                    _lastThermalLogTime = Time.time;
+                    Terminal.Log($"[Thermal Protection] {thermalReason} - Reducing throttle.");
+                }
             }
 
-            if (remoteControl.IsWheelslipping())
+            // ── Smart Sanding ────────────────────────────────────────────────
+            bool slipping = remoteControl.IsWheelslipping(true);
+            bool stopRequested = TargetSpeed < Mathf.Epsilon;
+            bool braking = error < -BRAKE_DEADBAND_KPH || stopRequested;
+
+            UpdateSmartSanding(slipping, speed, braking);
+
+            if (braking)
             {
-                targetAcceleration -= 0.5f * dt;
-                controlValue = -30.0f;
+                remoteControl.UpdateThrottle(-100f);
+
+                float overspeed = Mathf.Max(0f, -error);
+                bool hasDynamicBrake = controlsOverrider?.DynamicBrake != null;
+                float desiredDynamicBrake = 0f;
+                float desiredTrainBrake = 0f;
+
+                if (stopRequested)
+                {
+                    desiredDynamicBrake = speed > 10f ? 1.0f : 0f;
+                    desiredTrainBrake = Mathf.Lerp(0.35f, 0.75f, Mathf.Clamp01(speed / 30f));
+                }
+                else
+                {
+                    // Overspeed management on downhill or after speed limit drop:
+                    if (hasDynamicBrake && overspeed < 8.0f)
+                    {
+                        // Moderate overspeed: modulate dynamic brake smoothly, keep air brakes released
+                        desiredDynamicBrake = Mathf.Clamp01(overspeed / 5.0f);
+                        desiredTrainBrake = 0f;
+                    }
+                    else
+                    {
+                        // Stronger overspeed: full dynamic brake + proportional air brake
+                        desiredDynamicBrake = 1.0f;
+                        float accelFactor = Mathf.Max(0f, acceleration * 0.10f);
+                        desiredTrainBrake = Mathf.Clamp(0.18f + (overspeed * 0.04f) + accelFactor, 0.15f, 0.75f);
+                    }
+                }
+
+                MoveDynamicBrakeTowards(desiredDynamicBrake);
+                MoveTrainBrakeTowards(desiredTrainBrake);
+
+                float desiredIndependentBrake = stopRequested && speed < LOW_SPEED_KPH ? 0.30f : 0f;
+                MoveIndependentBrakeTowards(desiredIndependentBrake);
             }
+            else
+            {
+                // Not braking: release all brakes and dynamic brake
+                MoveDynamicBrakeTowards(0f);
+                MoveTrainBrakeTowards(0f);
+                MoveIndependentBrakeTowards(0f);
 
-            if (error < -3.0f || TargetSpeed < Mathf.Epsilon)
-                remoteControl.UpdateIndependentBrake(0.3f * error * -1.0f * dt);
-            else if (remoteControl.GetTargetIndependentBrake() > Mathf.Epsilon)
-                remoteControl.UpdateIndependentBrake(-30.0f * dt);
+                bool dynBrakeReleased = controlsOverrider?.DynamicBrake == null || controlsOverrider.DynamicBrake.Value <= 0.05f;
+                bool airBrakesReleased = remoteControl.GetTargetBrake() <= BRAKE_RELEASE_EPSILON
+                    && remoteControl.GetTargetIndependentBrake() <= BRAKE_RELEASE_EPSILON;
 
-            remoteControl.UpdateThrottle(ThrottleCurveFactor(remoteControl.GetTargetThrottle(), controlValue > 0.0f) * controlValue);
+                if (airBrakesReleased && dynBrakeReleased && thermalLevel != ThermalProtectionLevel.Critical && Time.time >= _slipCooldownUntilTime)
+                {
+                    // 1. Calculate maximum allowed throttle ceiling based on TargetSpeed
+                    float maxThrottleCeiling;
+                    if (TargetSpeed <= 15f)
+                        maxThrottleCeiling = 0.25f; // Notch 2 max for switching/coupling/tight curves
+                    else if (TargetSpeed <= 30f)
+                        maxThrottleCeiling = 0.40f; // Notch 3 max for yards, sidings
+                    else if (TargetSpeed <= 50f)
+                        maxThrottleCeiling = 0.58f; // Notch 4-5 max
+                    else if (TargetSpeed <= 70f)
+                        maxThrottleCeiling = 0.75f; // Notch 6 max
+                    else
+                        maxThrottleCeiling = 0.88f; // Notch 7 max for mainline
+
+                    // If heavily loaded on open line and accelerating very slowly (< 0.25 km/h/s), permit full throttle
+                    if (TargetSpeed > 45f && speed < TargetSpeed - 15f && acceleration < 0.25f && thermalLevel == ThermalProtectionLevel.Normal)
+                    {
+                        maxThrottleCeiling = 1.0f;
+                    }
+
+                    // 2. Amperage limiting
+                    float currentAmps = GetMaxConsistAmps();
+                    float ampCaution = GetConsistAmpCautionThreshold();
+                    if (currentAmps > ampCaution)
+                    {
+                        maxThrottleCeiling = Mathf.Min(maxThrottleCeiling, remoteControl.GetTargetThrottle());
+                        if (currentAmps > ampCaution * 1.15f)
+                            maxThrottleCeiling = Mathf.Max(0f, remoteControl.GetTargetThrottle() - 0.125f);
+                    }
+
+                    // 3. Thermal warning ceiling
+                    if (thermalLevel == ThermalProtectionLevel.Warning)
+                    {
+                        maxThrottleCeiling = Mathf.Min(maxThrottleCeiling, 0.35f);
+                    }
+
+                    // 4. Approach roll-off (anticipation)
+                    float speedMargin = TargetSpeed - speed;
+                    if (speedMargin < 6.0f)
+                    {
+                        float taper = Mathf.Clamp01(speedMargin / 6.0f);
+                        float cruisingHoldThrottle = 0.15f; // sufficient to overcome rolling resistance
+                        maxThrottleCeiling = Mathf.Min(maxThrottleCeiling, Mathf.Lerp(cruisingHoldThrottle, maxThrottleCeiling, taper));
+                    }
+
+                    if (speedMargin <= 0.8f && acceleration > 0.05f)
+                    {
+                        // Holding speed: ease off to coast/idle
+                        maxThrottleCeiling = Mathf.Min(maxThrottleCeiling, Mathf.Max(0f, remoteControl.GetTargetThrottle() - 0.05f));
+                    }
+
+                    // 5. Determine target throttle
+                    float currentThrottle = remoteControl.GetTargetThrottle();
+                    float desiredThrottle = Mathf.Clamp(controlValue * 0.05f, 0f, maxThrottleCeiling);
+
+                    // Rate-limit throttle increases to ~1 notch (0.125) every 0.8 seconds for smooth realistic application
+                    if (desiredThrottle > currentThrottle)
+                    {
+                        if (Time.time - _lastThrottleStepTime >= 0.8f)
+                        {
+                            float step = Mathf.Min(desiredThrottle - currentThrottle, 0.125f);
+                            remoteControl.UpdateThrottle(step * 10f);
+                            _lastThrottleStepTime = Time.time;
+                        }
+                    }
+                    else if (desiredThrottle < currentThrottle - 0.02f)
+                    {
+                        float step = Mathf.Min(currentThrottle - desiredThrottle, 0.25f);
+                        remoteControl.UpdateThrottle(-step * 10f);
+                        _lastThrottleStepTime = Time.time;
+                    }
+                }
+                else
+                {
+                    remoteControl.UpdateThrottle(-100f);
+                }
+            }
 
             return targetAcceleration;
+        }
+
+        /// <summary>
+        /// Moves a remote brake control toward an absolute 0..1 target by at
+        /// most one control step. This works for both notched and continuous
+        /// locomotive controls without assuming a particular notch count.
+        /// </summary>
+        protected void MoveTrainBrakeTowards(float target)
+        {
+            MoveBrakeTowards(remoteControl.GetTargetBrake(), target, remoteControl.UpdateBrake);
+        }
+
+        protected void MoveIndependentBrakeTowards(float target)
+        {
+            MoveBrakeTowards(remoteControl.GetTargetIndependentBrake(), target,
+                remoteControl.UpdateIndependentBrake);
+        }
+
+        private static void MoveBrakeTowards(float current, float target, Action<float> update)
+        {
+            float difference = Mathf.Clamp01(target) - current;
+            if (Mathf.Abs(difference) <= BRAKE_RELEASE_EPSILON)
+                return;
+
+            // RemoteControllerModule and ControlsOverriderRemote both treat
+            // +/-1 as one lever step. Smaller factors prevent overshooting a
+            // nearby target on continuous controls.
+            update(Mathf.Clamp(difference * 10f, -1f, 1f));
         }
 
         // ── DM3 gear management ──────────────────────────────────────────────

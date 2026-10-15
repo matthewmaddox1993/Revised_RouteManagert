@@ -33,6 +33,8 @@ namespace RevisedDVRoute
             indBrakeStep = CalcStep(co.IndependentBrake);
         }
 
+        public BaseControlsOverrider ControlsOverrider => co;
+
         private static float CalcStep(OverridableBaseControl ctrl)
         {
             if (ctrl == null || !ctrl.IsNotched) return 0.1f;
