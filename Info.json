@@ -5,7 +5,7 @@
     "Version": "1.0.4",
     "EntryMethod": "RevisedDVRoute.Module.Load",
     "ManagerVersion": "0.27.3",
-    "Repository": "https://raw.githubusercontent.com/matthewmaddox1993/Revised_RouteManagert/refs/heads/main/Repository.json",
+    "Repository": "https://raw.githubusercontent.com/matthewmaddox1993/Revised_RouteManagert/refs/heads/main/RevisedDVRoute/Repository.json",
     "Requirements": ["CommsRadioAPI"],
     "LoadAfter": ["DVSignals", "DoubleTrack", "AITraffic", "Revised_Mph", "AdvancedDispatcherSystem"]
 }
