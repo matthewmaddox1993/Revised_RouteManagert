@@ -80,8 +80,10 @@ namespace RevisedDVRoute
     {
         // Strongly prefer a clear route when DV Signals or AI Traffic has
         // reserved a track, while retaining it as a fallback for single-line
-        // corridors where every route shares the reservation.
-        private const double ReservedTrackPenalty = 5000.0;
+        // corridors where every route shares the reservation. Apply the
+        // penalty once when entering a reserved corridor rather than once per
+        // track segment; otherwise one busy block can outweigh the entire trip.
+        private const double ReservedCorridorPenalty = 45.0;
 
         private RailTrack start;
         private RailTrack goal;
@@ -329,6 +331,10 @@ namespace RevisedDVRoute
                         continue;
                     }
 
+                    bool currentSignalReserved = current != start && current != goal
+                        && Compatibility.DVSignalsCompatibility.IsReservedInSnapshot(current);
+                    bool currentAITrafficReserved = current != start && current != goal
+                        && Compatibility.AITrafficCompatibility.IsReservedInSnapshot(current);
                     bool neighborSignalReserved = neighbor != start && neighbor != goal
                         && Compatibility.DVSignalsCompatibility.IsReservedInSnapshot(neighbor);
                     bool neighborAITrafficReserved = neighbor != start && neighbor != goal
@@ -372,12 +378,15 @@ namespace RevisedDVRoute
                         continue;
 
                     // The two mods can describe the same protected section.
-                    // Apply one penalty while retaining separate diagnostics.
-                    if (neighborSignalReserved || neighborAITrafficReserved)
-                        newCost += ReservedTrackPenalty;
-                    if (neighborSignalReserved)
+                    // Penalize the entry into a reserved corridor once, instead
+                    // of charging every reserved segment on that corridor.
+                    bool enteringReservedCorridor = (neighborSignalReserved || neighborAITrafficReserved)
+                        && !(currentSignalReserved || currentAITrafficReserved);
+                    if (enteringReservedCorridor)
+                        newCost += ReservedCorridorPenalty;
+                    if (enteringReservedCorridor && neighborSignalReserved)
                         penalizedSignalReservedTracks++;
-                    if (neighborAITrafficReserved)
+                    if (enteringReservedCorridor && neighborAITrafficReserved)
                         penalizedAITrafficReservedTracks++;
 
                     if (neighbor != start && neighbor != goal && yardOrganizer != null
@@ -503,11 +512,11 @@ namespace RevisedDVRoute
                 allowReverse, carsToIgnore, consistLength, bannedTransitions, excludedTracks);
 
             if (penalizedSignalReservedTracks > 0)
-                Terminal.Log("DV Signals: strongly discouraged " + penalizedSignalReservedTracks
-                    + " reserved track candidate(s), while retaining them for single-corridor routes.");
+                Terminal.Log("DV Signals: strongly discouraged entry into " + penalizedSignalReservedTracks
+                    + " reserved corridor(s), while retaining them for single-corridor routes.");
             if (penalizedAITrafficReservedTracks > 0)
-                Terminal.Log("AI Traffic: strongly discouraged " + penalizedAITrafficReservedTracks
-                    + " reserved track candidate(s), while retaining them for single-corridor routes.");
+                Terminal.Log("AI Traffic: strongly discouraged entry into " + penalizedAITrafficReservedTracks
+                    + " reserved corridor(s), while retaining them for single-corridor routes.");
 
             if (goalState == null)
             {
@@ -544,8 +553,8 @@ namespace RevisedDVRoute
                 + "; initial next=" + (path.Count > 1 ? path[1].LogicTrack().ID.FullID : "none")
                 + "; DoubleTrack hazard candidates rejected=" + skippedUnsafeDoubleTrackSections
                 + "; requested exclusions rejected=" + skippedExcludedTracks
-                + "; DV Signals penalized candidates=" + penalizedSignalReservedTracks
-                + "; AI Traffic penalized candidates=" + penalizedAITrafficReservedTracks + ".");
+                + "; DV Signals penalized corridor entries=" + penalizedSignalReservedTracks
+                + "; AI Traffic penalized corridor entries=" + penalizedAITrafficReservedTracks + ".");
 
             return path;
         }

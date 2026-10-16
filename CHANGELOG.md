@@ -2,20 +2,42 @@
 
 All notable changes to Revised DV Route are recorded here.
 
-## 1.0.4 - 2026-10-15
+## 1.0.4 - 2026-10-16
 
-### AI routing and traffic protection
+### Route planning
 
+- Fixed excessively long routes around AI Traffic and DV Signals reservations. The planner previously added a flat 5000-point penalty to every reserved track segment, so one busy corridor could outweigh a whole detour. It now adds one bounded penalty when a route enters a reserved corridor, still preferring clear routes while keeping reserved single-corridor tracks as a fallback.
 - Changed route searches to use Dijkstra ordering for dynamic track costs and yield between batches on Unity's main thread, where rail and junction state can be read safely.
-- Used live AI Traffic reservations while driving, rather than relying on the route planner's one-second snapshot when entering a block.
-- Added AI Traffic's live bogie-distance and facing-signal checks so trains can brake for traffic on the current track and for STOP aspects before the next track boundary.
-- Refactored locomotive AI speed control into a dedicated hazard/speed-profile pipeline, inspired by AI Traffic's driver design while retaining Revised DV Route's route, ADS, and DV Signals integrations.
-- Made reverse-manoeuvre junction switching use the same exact branch selection and ADS protected-switch checks as initial route alignment, preventing compatibility gaps during route reversals.
-- Treated live ADS occupied-track or signal warnings without a matching ADS route as advisory: route planning now tries one reroute, then keeps the direct route with a warning when no different path exists.
-- Added a DV Signals STOP-aspect check at each facing signal's actual mast position, including when AI Traffic is not installed; reservations alone no longer stand in for signal aspects.
-- Measured unrelated bogies ahead on the current track without treating trains behind the AI as immediate obstacles. Kept the selected stationary consist exempt during a coupling approach while other trains remain blockers.
+- Made reverse-manoeuvre junction switching use the same exact branch selection and junction-protection checks as initial route alignment.
 - Prevented automatic switch changes when AI Traffic protects a junction or DV Signals reservation status cannot be read.
-- Made the AI hold when its route position or an active signal/traffic safety check is unavailable, and added track, speed, target, and next-track distance to hold logs.
+
+### Locomotive AI driver (adapted from AI Traffic)
+
+- Ported AI Traffic's brake controller: a brake PID, distance-based stopping urgency that primes the air brake early, dynamic/independent brake blending, emergency clamping when a stop is imminent, and a full standstill hold so the train does not roll back at a signal. PID controller adapted from [Killermops27/dv-ai-traffic](https://github.com/Killermops27/dv-ai-traffic).
+- The AI keeps its previous speed target for up to 2 s when the route position briefly drops out at junctions instead of braking hard.
+- An AI Traffic reservation on the track the train is already on no longer holds it.
+
+### DV Signals reservation
+
+- The DV Signals block reservation is now opt-in (setting renamed to "Reserve current DV Signals block for active route", default off). A reserved yard block turned every signal sharing it, including the one in front of the player, to STOP_RESERVED. Routing still avoids and respects other trains' reservations.
+
+- Fixed the signal in front of the player turning red (`STOP_RESERVED`) as soon as a route was created and returning to yellow when the route was cancelled. The rolling reservation now claims only the block the train is already inside, never the block ahead.
+- Fixed the console and `Player.log` flood of `[DVSignals] Reservation failed: no tracks could be reserved`. Claims on a block another signal already holds are no longer attempted, and retries back off from 2 s up to 12 s instead of repeating every 2 s.
+- Fixed the locomotive AI treating the player's own rolling reservation as a foreign STOP signal, which could make it hold for its own block.
+
+### Compatibility
+
+- Disabled Advanced Dispatcher System (ADS) integration. ADS no longer blocks, reroutes, or annotates routes, and no longer takes DV Signals authority. ADS is unsupported and not recommended alongside this mod; the F10 panel reports it as disabled. DV Signals and AI Traffic are the supported integrations and work together.
+- Added a README troubleshooting entry explaining why a route can be longer when an AI train occupies the shortest path at planning time, and what to do.
+
+### Locomotive AI
+
+- Fixed the AI rolling backward after stopping at a restrictive signal or hold. Low-speed stops now use a stronger train-brake hold that increases toward standstill, plus an independent-brake hold, instead of easing the brake off at low speed.
+- Refactored AI speed control into a hazard/speed-profile pipeline inspired by AI Traffic's driver design, with limiting reasons, braking envelopes, and a crawl-style final approach.
+- Used live AI Traffic reservations and AI Traffic's bogie-distance and facing-signal checks while driving, instead of the planner's one-second snapshot.
+- Added a DV Signals STOP-aspect check at each facing signal's actual mast position, including when AI Traffic is not installed.
+- Measured unrelated bogies ahead without treating trains behind the AI as obstacles, and kept the selected stationary consist exempt during a coupling approach.
+- Made the AI hold when its route position or a signal/traffic safety check is unavailable, and added track, speed, target, limiting reason, and distance to hold logs.
 
 ### Speed control
 

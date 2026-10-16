@@ -237,7 +237,7 @@ namespace RevisedDVRoute.Compatibility
                 if (Module.settings == null || !Module.settings.RespectDVSignalsReservations)
                     return "reservation protection disabled";
 
-                if (!Module.settings.ReserveDVSignalsRoute)
+                if (!Module.settings.ReserveDVSignalsBlock)
                     return "reservation protection enabled; player route reservation disabled";
 
                 if (ADSCompatibility.ManagesDVSignals)
@@ -410,7 +410,7 @@ namespace RevisedDVRoute.Compatibility
             {
                 return ProtectionEnabled
                     && Module.settings != null
-                    && Module.settings.ReserveDVSignalsRoute
+                    && Module.settings.ReserveDVSignalsBlock
                     && !ADSCompatibility.ManagesDVSignals;
             }
         }
@@ -506,6 +506,13 @@ namespace RevisedDVRoute.Compatibility
                 if (reserved)
                 {
                     object signal = arguments[1];
+                    // The player's own rolling reservation must not stop the
+                    // player's own locomotive AI.
+                    if (DVSignalsRouteReservation.OwnsSignal(signal))
+                    {
+                        reserved = false;
+                        return true;
+                    }
                     reservationOwner = signalName?.GetValue(signal, null) as string;
                 }
                 return true;
@@ -521,6 +528,26 @@ namespace RevisedDVRoute.Compatibility
                     Module.mod?.Logger.Log("DV Signals reservation check disabled after an API error: "
                         + exception.GetType().Name);
                 }
+                return false;
+            }
+        }
+
+        internal static bool TryGetTrackReservationHolder(RailTrack track, out object holder)
+        {
+            holder = null;
+            if (track == null || isTrackReserved == null)
+                return false;
+
+            try
+            {
+                object[] arguments = { track, null };
+                if (!(bool)isTrackReserved.Invoke(null, arguments))
+                    return false;
+                holder = arguments[1];
+                return true;
+            }
+            catch
+            {
                 return false;
             }
         }

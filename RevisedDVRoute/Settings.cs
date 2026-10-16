@@ -14,12 +14,14 @@ namespace RevisedDVRoute
         [Draw(DrawType.ToggleGroup, Label = "Reversing strategy")] public ReversingStrategy ReversingStrategy = ReversingStrategy.OnlyIfNeeded;
         [Header("Compatibility")]
         [Draw("Respect DV Signals reservations", DrawType.Toggle)] public bool RespectDVSignalsReservations = true;
-        [Draw("Reserve next DV Signals block for active route", DrawType.Toggle)] public bool ReserveDVSignalsRoute = true;
+        // Off by default: DV Signals turns every signal sharing a reserved block red,
+        // including the one in front of the player.
+        [Draw("Reserve current DV Signals block for active route (turns shared signals red)", DrawType.Toggle)] public bool ReserveDVSignalsBlock = false;
         [Header("Keys")]
 [Draw(DrawType.KeyBinding)] public KeyBinding TrainEndAlarm = new KeyBinding() { keyCode = KeyCode.N };
         public void OnChange()
         {
-            if (!RespectDVSignalsReservations || !ReserveDVSignalsRoute)
+            if (!RespectDVSignalsReservations || !ReserveDVSignalsBlock)
                 Compatibility.DVSignalsCompatibility.ClearPlayerRouteReservation();
         }
 

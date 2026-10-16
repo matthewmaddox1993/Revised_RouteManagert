@@ -22,6 +22,7 @@ namespace RevisedDVRoute.Compatibility
     internal static class DVSignalsRouteReservation
     {
         private const float RetryInterval = 2f;
+        private const float MaxRetryInterval = 12f;
 
         private sealed class ReservationCandidate
         {
@@ -29,6 +30,7 @@ namespace RevisedDVRoute.Compatibility
             public string SignalName;
             public int FirstPathIndex;
             public int LastPathIndex;
+            public List<RailTrack> Tracks;
         }
 
         private static Type signalType;
@@ -65,6 +67,7 @@ namespace RevisedDVRoute.Compatibility
         private static bool ownsReservation;
         private static bool reservationSuspendedForRoute;
         private static float nextAttemptTime;
+        private static float currentRetryDelay = RetryInterval;
         private static string lastOutcome;
         private static bool apiUnavailableLogged;
         private static bool apiErrorLogged;
@@ -362,8 +365,15 @@ namespace RevisedDVRoute.Compatibility
 
             if (candidate == null)
             {
-                nextAttemptTime = Time.time + RetryInterval;
+                ScheduleRetry();
                 SetOutcome("No reservable DV Signals block covers the remaining player route.");
+                return;
+            }
+
+            if (IsBlockBusy(candidate))
+            {
+                ScheduleRetry();
+                SetOutcome("Player route is waiting for DV Signals block " + candidate.SignalName + " to become available.");
                 return;
             }
 
@@ -371,7 +381,7 @@ namespace RevisedDVRoute.Compatibility
             {
                 if (multiplayerReserve == null || multiplayerReserveResult == null)
                 {
-                    nextAttemptTime = Time.time + RetryInterval;
+                    ScheduleRetry();
                     SetOutcome("DV Signals multiplayer reservation API is unavailable; waiting without changing local signal state.");
                     return;
                 }
@@ -412,7 +422,7 @@ namespace RevisedDVRoute.Compatibility
 
             if (!reserved)
             {
-                nextAttemptTime = Time.time + RetryInterval;
+                ScheduleRetry();
                 SetOutcome("Player route is waiting for DV Signals block " + candidate.SignalName + " to become available.");
                 return;
             }
@@ -421,7 +431,26 @@ namespace RevisedDVRoute.Compatibility
             reservedLastPathIndex = candidate.LastPathIndex;
             ownsReservation = true;
             nextAttemptTime = 0f;
+            currentRetryDelay = RetryInterval;
             SetOutcome("Reserved DV Signals player route block at " + candidate.SignalName + ".");
+        }
+
+        // DV Signals rejects (and logs a warning for) a claim on a block whose
+        // tracks another signal already holds, so check first and stay quiet.
+        private static bool IsBlockBusy(ReservationCandidate candidate)
+        {
+            if (candidate.Tracks == null)
+                return false;
+
+            foreach (RailTrack track in candidate.Tracks)
+            {
+                object holder;
+                if (DVSignalsCompatibility.TryGetTrackReservationHolder(track, out holder)
+                    && !ReferenceEquals(holder, candidate.Signal))
+                    return true;
+            }
+
+            return false;
         }
 
         private static ReservationCandidate FindNextCandidate(Route route, int startPathIndex)
@@ -434,6 +463,13 @@ namespace RevisedDVRoute.Compatibility
 
                 ReservationCandidate candidate = BuildCandidate(signal, route, startPathIndex);
                 if (candidate == null)
+                    continue;
+
+                // A block ahead of the train belongs to a signal the train has
+                // not yet passed. Reserving it turns the signal in front of the
+                // player (and any crossing signal) to STOP_RESERVED, so only
+                // claim the block the train already occupies.
+                if (candidate.FirstPathIndex > Math.Max(0, startPathIndex))
                     continue;
 
                 if (best == null
@@ -521,7 +557,8 @@ namespace RevisedDVRoute.Compatibility
                 Signal = signal,
                 SignalName = GetSignalName(signal),
                 FirstPathIndex = first,
-                LastPathIndex = last
+                LastPathIndex = last,
+                Tracks = directedTracks.Select(item => item.Key).ToList()
             };
         }
 
@@ -657,7 +694,7 @@ namespace RevisedDVRoute.Compatibility
 
             if (!result)
             {
-                nextAttemptTime = Time.time + RetryInterval;
+                ScheduleRetry();
                 SetOutcome("DV Signals multiplayer host rejected player route block "
                     + GetSignalName(signal) + ".");
                 return;
@@ -749,6 +786,7 @@ namespace RevisedDVRoute.Compatibility
 
         private static void ResetReservationState()
         {
+            currentRetryDelay = RetryInterval;
             reservedSignal = null;
             reservedLastPathIndex = -1;
             ownsReservation = false;
@@ -900,6 +938,14 @@ namespace RevisedDVRoute.Compatibility
                 .FirstOrDefault(type => type != null);
         }
 
+        // Every failed claim makes DV Signals log a warning, so back off
+        // instead of retrying every two seconds for as long as a block is busy.
+        private static void ScheduleRetry()
+        {
+            nextAttemptTime = Time.time + currentRetryDelay;
+            currentRetryDelay = Math.Min(currentRetryDelay * 2f, MaxRetryInterval);
+        }
+
         private static void SetOutcome(string message)
         {
             if (message == lastOutcome)
@@ -920,7 +966,7 @@ namespace RevisedDVRoute.Compatibility
 
         private static void LogApiError(Exception exception)
         {
-            nextAttemptTime = Time.time + RetryInterval;
+            ScheduleRetry();
 
             if (apiErrorLogged)
                 return;

@@ -8,6 +8,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
+using RevisedDVRoute.Driver;
 using UnityEngine;
 
 namespace RevisedDVRoute
@@ -91,6 +92,15 @@ namespace RevisedDVRoute
         private const float BRAKE_DEADBAND_KPH = 0.75f;
         private const float BRAKE_RELEASE_EPSILON = 0.01f;
         private const float LOW_SPEED_KPH = 6.0f;
+
+        // Braking model adapted from dv-ai-traffic's AIEngineer: a brake PID plus
+        // distance-based stopping urgency, dynamic/independent blending and a
+        // standstill hold. Only enabled for the locomotive AI.
+        protected virtual bool UseTrafficBraking => false;
+        protected float StopDistanceMeters = float.PositiveInfinity;
+        private readonly PIDController brakePid = new PIDController(
+            kp: 0.14f, ki: 0.02f, kd: 0.05f, minOutput: 0f, maxOutput: 1f,
+            filterTimeConstant: 0.10f, derivativeOnMeasurement: true);
 
         public enum ThermalProtectionLevel
         {
@@ -249,6 +259,10 @@ namespace RevisedDVRoute
         {
             integral = 0f;
             previousError = 0f;
+            brakePid.Reset();
+            throttlePid.Reset();
+            rampThrottle = 0f;
+            hillAssistBoost = 0f;
             stopRequested = false;
             _awaitingShift = false;
             _pendingShiftDir = 0;
@@ -401,9 +415,11 @@ namespace RevisedDVRoute
                     }
                     else
                     {
-                        // Dynamic braking fades at low speed; finish the stop on air.
+                        // Dynamic braking fades at low speed; finish the stop on air
+                        // and increase the hold as the train nears a standstill so
+                        // signal stops do not roll backward on grades.
                         desiredDynamicBrake = 0f;
-                        desiredTrainBrake = Mathf.Lerp(0.35f, 0.75f, Mathf.Clamp01(speed / 30f));
+                        desiredTrainBrake = Mathf.Lerp(0.80f, 0.35f, Mathf.Clamp01(speed / 30f));
                     }
                 }
                 else
@@ -425,14 +441,28 @@ namespace RevisedDVRoute
                     }
                 }
 
+                float desiredIndependentBrake = 0f;
+                if (stopRequested && speed < LOW_SPEED_KPH)
+                {
+                    desiredTrainBrake = Mathf.Max(desiredTrainBrake,
+                        speed < 1.5f ? 0.85f : 0.65f);
+                    desiredIndependentBrake = speed < 1.5f ? 0.75f : 0.45f;
+                }
+
+                if (UseTrafficBraking)
+                {
+                    ComputeTrafficBraking(speed, dt, hasDynamicBrake,
+                        out desiredDynamicBrake, out desiredTrainBrake,
+                        out desiredIndependentBrake);
+                }
+
                 MoveDynamicBrakeTowards(desiredDynamicBrake);
                 MoveTrainBrakeTowards(desiredTrainBrake);
-
-                float desiredIndependentBrake = stopRequested && speed < LOW_SPEED_KPH ? 0.30f : 0f;
                 MoveIndependentBrakeTowards(desiredIndependentBrake);
             }
             else
             {
+                brakePid.Reset();
                 // Not braking: release the train and dynamic brakes. During a
                 // hill start, retain a modest independent-brake hold until the
                 // locomotive has enough power to prevent further rollback.
@@ -482,6 +512,9 @@ namespace RevisedDVRoute
                         maxThrottleCeiling = 1.0f;
                     }
 
+                    if (UseTrafficBraking)
+                        maxThrottleCeiling = 1.0f;
+
                     // 2. Amperage limiting
                     float currentAmps = GetMaxConsistAmps();
                     float ampCaution = GetConsistAmpCautionThreshold();
@@ -515,7 +548,9 @@ namespace RevisedDVRoute
 
                     // 5. Determine target throttle
                     float currentThrottle = remoteControl.GetTargetThrottle();
-                    float desiredThrottle = Mathf.Clamp(controlValue * 0.05f, 0f, maxThrottleCeiling);
+                    float desiredThrottle = UseTrafficBraking
+                        ? Mathf.Clamp(ComputeTrafficThrottle(speed, acceleration, dt), 0f, maxThrottleCeiling)
+                        : Mathf.Clamp(controlValue * 0.05f, 0f, maxThrottleCeiling);
 
                     // Use the normal smooth ramp while running. A rollback needs
                     // a faster, human-like power-brake start before gravity gains
@@ -544,6 +579,148 @@ namespace RevisedDVRoute
             }
 
             return targetAcceleration;
+        }
+
+        private readonly PIDController throttlePid = new PIDController(
+            kp: 0.08f, ki: 0.02f, kd: 0.04f, minOutput: 0f, maxOutput: 1f,
+            filterTimeConstant: 0.15f, derivativeOnMeasurement: true);
+        private float rampThrottle;
+        private float hillAssistBoost;
+        private const float TRAFFIC_SPEED_TOLERANCE_KPH = 1.0f;
+
+        // Throttle model adapted from dv-ai-traffic's AIEngineer: an
+        // acceleration-feedback ramp while building speed, grade/low-speed
+        // power ceilings with a hill-assist boost, a proportional roll-off
+        // approaching the target and a PID to hold speed once on target.
+        private float ComputeTrafficThrottle(float speedKph, float acceleration, float dt)
+        {
+            float delta = TargetSpeed - speedKph;
+            float accelMps2 = acceleration / 3.6f;
+            if (delta <= 0f)
+            {
+                rampThrottle = Mathf.MoveTowards(rampThrottle, 0f, 0.2f * dt);
+                hillAssistBoost = Mathf.MoveTowards(hillAssistBoost, 0f, 0.2f * dt);
+                return 0f;
+            }
+
+            if (Mathf.Abs(delta) <= TRAFFIC_SPEED_TOLERANCE_KPH)
+            {
+                rampThrottle = Mathf.MoveTowards(rampThrottle,
+                    throttlePid.Update(TargetSpeed, speedKph, dt), 0.06f * dt);
+                return rampThrottle;
+            }
+
+            float direction = remoteControl.GetReverserValue() > 0.5f ? 1f : -1f;
+            float pitch = trainCar != null ? trainCar.transform.forward.y * direction : 0f;
+            bool uphill = pitch > 0.0015f;
+            bool sluggish = accelMps2 < 0.08f && delta > 3f;
+            string livery = trainCar?.carLivery?.id ?? "";
+            bool isDE2 = livery.IndexOf("DE2", StringComparison.OrdinalIgnoreCase) >= 0
+                || livery.IndexOf("Shunter", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            float ceiling;
+            if (speedKph < 6f)
+            {
+                if (uphill)
+                    ceiling = _isDM3 ? (pitch > 0.010f ? 1f : 0.90f)
+                        : isDE2 ? 0.40f : (pitch > 0.015f ? 0.85f : 0.70f);
+                else
+                    ceiling = _isDM3 ? 0.60f : 0.28f;
+            }
+            else if (speedKph < 15f)
+            {
+                float floor = uphill ? (_isDM3 ? 0.90f : 0.65f) : (_isDM3 ? 0.65f : 0.28f);
+                ceiling = Mathf.Lerp(floor, _isDM3 ? 1f : 0.75f, (speedKph - 6f) / 9f);
+            }
+            else if (speedKph < 25f)
+                ceiling = Mathf.Lerp(_isDM3 ? 0.90f : 0.75f, 1f, (speedKph - 15f) / 10f);
+            else
+                ceiling = 1f;
+
+            if (speedKph < 20f && (uphill || sluggish))
+            {
+                if (accelMps2 < 0.10f)
+                {
+                    float rate = uphill && pitch > 0.015f ? 0.16f : 0.10f;
+                    hillAssistBoost = Mathf.MoveTowards(hillAssistBoost,
+                        _isDM3 ? 0.85f : 0.60f, rate * dt);
+                }
+                else if (accelMps2 > 0.20f)
+                    hillAssistBoost = Mathf.MoveTowards(hillAssistBoost, 0f, 0.06f * dt);
+            }
+            else
+                hillAssistBoost = Mathf.MoveTowards(hillAssistBoost, 0f, 0.10f * dt);
+
+            float maxCeiling = Mathf.Clamp01(ceiling + hillAssistBoost);
+
+            if (rampThrottle < 0.15f && speedKph < 1f)
+                rampThrottle = _isDM3 ? (uphill ? 0.70f : 0.35f)
+                    : (uphill ? (isDE2 ? 0.22f : 0.35f) : 0.12f);
+
+            if (accelMps2 < 0.12f)
+            {
+                float notch = speedKph < 6f ? 0.050f : 0.070f;
+                if ((uphill || sluggish) && accelMps2 < 0.05f)
+                    notch = _isDM3 ? 0.22f : 0.12f;
+                rampThrottle += notch * dt;
+            }
+            else if (accelMps2 > 0.30f)
+                rampThrottle -= 0.07f * dt;
+
+            if (delta < 4f)
+                maxCeiling = Mathf.Min(maxCeiling, Mathf.Clamp01(delta / 4f));
+
+            rampThrottle = Mathf.Clamp(rampThrottle, 0f, maxCeiling);
+            return rampThrottle;
+        }
+
+        private void ComputeTrafficBraking(float speedKph, float dt, bool hasDynamicBrake,
+            out float dynamicBrake, out float trainBrake, out float independentBrake)
+        {
+            float speedMps = speedKph / 3.6f;
+            float distToStop = StopDistanceMeters;
+            float brake = brakePid.Update(speedKph, TargetSpeed, dt);
+
+            if (distToStop < 600f && TargetSpeed <= 15f)
+            {
+                // Stop 20 m short of the restriction and prime the air line early.
+                float effectiveDist = Mathf.Max(0.5f, distToStop - 20f);
+                float reqDecel = speedMps * speedMps / (2f * effectiveDist);
+                if (reqDecel > 0.15f)
+                {
+                    float ratio = Mathf.Clamp01((reqDecel - 0.15f) / 0.30f);
+                    brake = Mathf.Max(brake, 0.45f + ratio * 0.55f);
+                }
+
+                if (distToStop <= 20f
+                    || (distToStop < 35f && speedKph > 6f)
+                    || (distToStop < 60f && speedKph > 15f))
+                    brake = 1f;
+                else if (distToStop < 120f && speedKph > 30f)
+                    brake = Mathf.Max(brake, 0.85f);
+            }
+
+            trainBrake = brake;
+            dynamicBrake = hasDynamicBrake && speedKph > 5f
+                ? Mathf.Clamp01(brake * 1.25f) : 0f;
+
+            independentBrake = 0f;
+            if ((TargetSpeed <= 0.5f || distToStop < 100f) && speedKph < 18f)
+                independentBrake = Mathf.Clamp01(brake * 1.5f);
+
+            if (distToStop < 30f || (distToStop < 80f && speedKph > 25f))
+            {
+                trainBrake = 1f;
+                independentBrake = 1f;
+                if (hasDynamicBrake)
+                    dynamicBrake = 1f;
+            }
+
+            if (speedKph < 0.5f && (TargetSpeed <= 0.1f || distToStop <= 45f))
+            {
+                trainBrake = Mathf.Max(0.6f, brake);
+                independentBrake = 1f;
+            }
         }
 
         /// <summary>

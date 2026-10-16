@@ -9,9 +9,8 @@ using UnityModManagerNet;
 namespace RevisedDVRoute.Compatibility
 {
     /// <summary>
-    /// Reads ADS route warnings and the dispatcher's live occupancy,
-    /// reservation, and signal snapshots. This integration never sends
-    /// commands to ADS.
+    /// Disabled ADS compatibility shim. Revised DV Route no longer consumes
+    /// ADS state and instead recommends DV Signals plus AI Traffic.
     /// </summary>
     internal static class ADSCompatibility
     {
@@ -87,19 +86,14 @@ namespace RevisedDVRoute.Compatibility
         private static string lastLoggedError;
         private static string lastLoggedSwitchError;
         private static readonly HashSet<int> LoggedBlockedJunctions = new HashSet<int>();
+        private const string DisabledStatusDescription = "ADS integration disabled; unsupported while using Revised DV Route. Disable ADS when using this mod.";
 
-        private static string statusDescription
-            = "Read-only route safety check ready; no route checked yet.";
+        private static string statusDescription = DisabledStatusDescription;
         internal static string StatusDescription
         {
             get
             {
-                UnityModManager.ModEntry adsMod = FindADSMod();
-                if (adsMod == null)
-                    return "read-only integration inactive; ADS is not installed";
-                if (!adsMod.Active)
-                    return "read-only integration inactive while ADS is disabled";
-                return statusDescription;
+                return DisabledStatusDescription;
             }
             private set { statusDescription = value; }
         }
@@ -113,25 +107,7 @@ namespace RevisedDVRoute.Compatibility
         {
             get
             {
-                Route route = Module.ActiveRoute?.Route;
-                bool delegated = OwnsSignalAuthority(route, null);
-                if (delegated && !signalsDelegationLogged && Module.mod != null)
-                {
-                    Module.mod.Logger.Log(
-                        "ADS has a matching reserved route: DV Signals authority delegated for this route.");
-                    signalsDelegationLogged = true;
-                    localSignalAuthorityLogged = false;
-                }
-                else if (!delegated && signalsDelegationLogged && !localSignalAuthorityLogged
-                    && route != null && Module.mod != null)
-                {
-                    Module.mod.Logger.Log(
-                        "ADS no longer owns the active route's signal reservation; Revised DV Route resumed rolling DV Signals authority.");
-                    localSignalAuthorityLogged = true;
-                    signalsDelegationLogged = false;
-                }
-
-                return delegated;
+                return false;
             }
         }
         private static string[] Warnings { get; set; } = new string[0];
@@ -146,22 +122,7 @@ namespace RevisedDVRoute.Compatibility
 
         internal static bool IsTrackBlockedAhead(RailTrack track)
         {
-            if (track == null || BlockingTrackIds == null || !EnsureApi()) return false;
-
-            try
-            {
-                object dispatcher = runtimeField?.GetValue(null);
-                string trackId = dispatcher == null || trackIdMethod == null
-                    ? null
-                    : Convert.ToString(trackIdMethod.Invoke(dispatcher, new object[] { track }));
-                return !string.IsNullOrWhiteSpace(trackId)
-                    && BlockingTrackIds.Any(id => string.Equals(id, trackId,
-                        StringComparison.OrdinalIgnoreCase));
-            }
-            catch
-            {
-                return false;
-            }
+            return false;
         }
 
         /// <summary>
@@ -171,57 +132,6 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         internal static void RefreshActiveRouteSafety(Route route)
         {
-            if (route?.Path == null || route.Path.Count == 0)
-                return;
-
-            long now = UtcNowMilliseconds();
-            if (ReferenceEquals(lastLiveSafetyRoute, route)
-                && now - lastLiveSafetyRefresh >= 0
-                && now - lastLiveSafetyRefresh < 500)
-                return;
-
-            lastLiveSafetyRoute = route;
-            lastLiveSafetyRefresh = now;
-            UnityModManager.ModEntry adsMod = FindADSMod();
-            if (adsMod == null || !adsMod.Active || !EnsureApi())
-                return;
-
-            List<RailTrack> path = route.Path.Where(track => track != null).ToList();
-            RefreshStatus(route.Trainset, path);
-            if (!apiResolved || runtimeField == null || trackIdMethod == null)
-                return;
-
-            try
-            {
-                object dispatcher = runtimeField.GetValue(null);
-                if (dispatcher == null)
-                    return;
-
-                var pathIds = path.Select(track => Convert.ToString(
-                        trackIdMethod.Invoke(dispatcher, new object[] { track })))
-                    .ToList();
-                var blocked = new HashSet<string>(BlockingTrackIds ?? new string[0],
-                    StringComparer.OrdinalIgnoreCase);
-                var nonReroutable = new HashSet<string>(
-                    NonReroutableTrackIds ?? new string[0], StringComparer.OrdinalIgnoreCase);
-                int occupied;
-                int reserved;
-                int signals;
-                AddLiveBlockingTrackIds(dispatcher, pathIds,
-                    GetTrainCarIds(route.Trainset), MatchedRouteId, !HasMatchingRoute,
-                    blocked, nonReroutable, out occupied, out reserved, out signals);
-                BlockingTrackIds = blocked.ToArray();
-                NonReroutableTrackIds = nonReroutable.ToArray();
-            }
-            catch (Exception exception)
-            {
-                string message = exception.GetBaseException().Message;
-                if (lastLoggedError != message)
-                {
-                    lastLoggedError = message;
-                    Module.mod?.Logger.Log("ADS live route-safety refresh failed: " + message);
-                }
-            }
         }
 
         /// <summary>
@@ -270,6 +180,7 @@ namespace RevisedDVRoute.Compatibility
             LastDirectRouteFallbackAllowed = false;
             LastRouteCheckPerformed = false;
             LastRouteCheckNotice = null;
+            StatusDescription = DisabledStatusDescription;
         }
 
         /// <summary>
@@ -280,38 +191,7 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         internal static bool OwnsSignalAuthority(Route route, int? signalId)
         {
-            long now = UtcNowMilliseconds();
-            if (!signalId.HasValue)
-            {
-                if (ReferenceEquals(cachedAuthorityRoute, route)
-                    && now - cachedAuthorityTime >= 0
-                    && now - cachedAuthorityTime < AuthorityCacheMilliseconds)
-                    return cachedAuthorityResult;
-            }
-            else if (ReferenceEquals(cachedSignalAuthorityRoute, route)
-                && cachedSignalAuthorityId == signalId.Value
-                && now - cachedSignalAuthorityTime >= 0
-                && now - cachedSignalAuthorityTime < AuthorityCacheMilliseconds)
-            {
-                return cachedSignalAuthorityResult;
-            }
-
-            bool result = EvaluateSignalAuthority(route, signalId);
-            if (!signalId.HasValue)
-            {
-                cachedAuthorityRoute = route;
-                cachedAuthorityTime = now;
-                cachedAuthorityResult = result;
-            }
-            else
-            {
-                cachedSignalAuthorityRoute = route;
-                cachedSignalAuthorityId = signalId.Value;
-                cachedSignalAuthorityTime = now;
-                cachedSignalAuthorityResult = result;
-            }
-
-            return result;
+            return false;
         }
 
         private static bool EvaluateSignalAuthority(Route route, int? signalId)
@@ -455,38 +335,7 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         public static string AppendFailureNotice(string failureMessage, Trainset trainset)
         {
-            UnityModManager.ModEntry adsMod = FindADSMod();
-            if (adsMod == null)
-                return failureMessage;
-
-            if (!adsMod.Active)
-                return failureMessage + "\nADS warning details unavailable: ADS is installed but disabled.";
-
-            if (LastRouteCheckPerformed && !string.IsNullOrWhiteSpace(LastRouteCheckNotice))
-                return failureMessage + "\n" + LastRouteCheckNotice;
-
-            RefreshStatus(trainset);
-            if (!HasMatchingRoute)
-                return failureMessage + "\nADS warning details unavailable: " + Shorten(StatusDescription, 160);
-
-            if (Warnings.Length == 0)
-            {
-                string noWarningDetails = FormatRouteReason(RouteReason);
-                if (string.IsNullOrWhiteSpace(noWarningDetails))
-                    noWarningDetails = "ADS reports no warnings for the matching train.";
-                return failureMessage + "\n" + noWarningDetails;
-            }
-
-            var warningLines = Warnings.Take(3)
-                .Select(warning => "ADS warning: " + Shorten(warning, 110))
-                .ToList();
-            string routeReason = FormatRouteReason(RouteReason);
-            if (!string.IsNullOrWhiteSpace(routeReason))
-                warningLines.Insert(0, routeReason);
-            if (Warnings.Length > 3)
-                warningLines.Add("ADS reports " + (Warnings.Length - 3) + " more warning(s).");
-
-            return failureMessage + "\n" + string.Join("\n", warningLines.ToArray());
+            return failureMessage;
         }
 
         /// <summary>
@@ -496,41 +345,7 @@ namespace RevisedDVRoute.Compatibility
         /// </summary>
         public static string AppendRouteWarningNotice(string routeResult, Trainset trainset)
         {
-            UnityModManager.ModEntry adsMod = FindADSMod();
-            if (adsMod == null)
-                return routeResult;
-
-            if (!adsMod.Active)
-                return routeResult + "\nADS status unavailable: ADS is installed but disabled.";
-
-            // TryGetBlockingTracks performs the route-specific ADS check before
-            // the route is activated. Preserve that result; refreshing here
-            // without the attempted path used to replace it with the confusing
-            // "warning status unavailable" message.
-            if (LastRouteCheckPerformed && !string.IsNullOrWhiteSpace(LastRouteCheckNotice))
-                return routeResult + "\n" + LastRouteCheckNotice;
-
-            RefreshStatus(trainset);
-            if (!HasMatchingRoute)
-                return routeResult + (apiResolved
-                    ? "\nADS connected; no ADS route plan exists to report warnings for."
-                    : "\nADS check unavailable: " + Shorten(StatusDescription, 150));
-
-            var warningLines = new List<string>();
-            string routeReason = FormatKnownRouteWarningReason(RouteReason);
-            if (!string.IsNullOrWhiteSpace(routeReason))
-                warningLines.Add(routeReason);
-
-            foreach (string warning in Warnings.Take(3))
-                warningLines.Add("ADS warning: " + Shorten(warning, 110));
-
-            if (warningLines.Count == 0)
-                return routeResult + "\nADS reports no active warnings for the matching train.";
-
-            if (Warnings.Length > 3)
-                warningLines.Add("ADS reports " + (Warnings.Length - 3) + " more warning(s).");
-
-            return routeResult + "\n" + string.Join("\n", warningLines.ToArray());
+            return routeResult;
         }
 
         /// <summary>
@@ -543,214 +358,20 @@ namespace RevisedDVRoute.Compatibility
             IEnumerable<RailTrack> attemptedPath, out HashSet<RailTrack> blockingTracks)
         {
             blockingTracks = new HashSet<RailTrack>();
-            UnityModManager.ModEntry adsMod = FindADSMod();
-            if (adsMod == null || !adsMod.Active || attemptedPath == null)
-                return false;
-
-            List<RailTrack> path = attemptedPath.Where(track => track != null).ToList();
-            RefreshStatus(trainset, path);
-            if (!apiResolved || runtimeField == null)
-            {
-                LastRouteCheckPerformed = true;
-                LastRouteCheckNotice = "ADS check unavailable: " + Shorten(StatusDescription, 140);
-                return false;
-            }
-
-            try
-            {
-                object dispatcher = runtimeField.GetValue(null);
-                if (dispatcher == null || trackIdMethod == null)
-                {
-                    LastRouteCheckPerformed = true;
-                    LastRouteCheckNotice = "ADS check unavailable: waiting for the ADS game dispatcher.";
-                    return false;
-                }
-
-                var blockedIds = new HashSet<string>(BlockingTrackIds,
-                    StringComparer.OrdinalIgnoreCase);
-                var nonReroutableIds = new HashSet<string>(NonReroutableTrackIds,
-                    StringComparer.OrdinalIgnoreCase);
-                var pathIds = new List<string>(path.Count);
-                foreach (RailTrack track in path)
-                {
-                    pathIds.Add(Convert.ToString(trackIdMethod.Invoke(dispatcher,
-                        new object[] { track })));
-                }
-
-                int occupiedBlockers;
-                int reservedBlockers;
-                int signalBlockers;
-                bool liveStateAvailable = AddLiveBlockingTrackIds(dispatcher, pathIds,
-                    GetTrainCarIds(trainset), MatchedRouteId, !HasMatchingRoute,
-                    blockedIds, nonReroutableIds, out occupiedBlockers,
-                    out reservedBlockers, out signalBlockers);
-
-                // ADS can also record a signal conflict on the origin or
-                // destination from its own plan. Those rails are on every
-                // possible path, so a signal-only conflict there cannot be
-                // routed around and must not drive a proxy exclusion.
-                blockedIds.RemoveWhere(id => IsEndpointOnly(pathIds, id)
-                    && !nonReroutableIds.Contains(id));
-
-                bool recordedBlockingTrackOnAttemptedPath = pathIds.Any(id =>
-                    !string.IsNullOrWhiteSpace(id)
-                    && !IsEndpointOnly(pathIds, id)
-                    && BlockingTrackIds.Contains(id, StringComparer.OrdinalIgnoreCase));
-                bool blockingTrackOnAttemptedPath = pathIds.Any(id =>
-                    !string.IsNullOrWhiteSpace(id) && blockedIds.Contains(id));
-                bool routeLevelBlockerWithoutTrack = HasBlockingRouteReason
-                    && BlockingTrackIds.Length == 0;
-                bool advisoryLiveConflictWithoutMatchingRoute = !HasMatchingRoute
-                    && !HasBlockingRouteReason
-                    && reservedBlockers == 0
-                    && (occupiedBlockers > 0 || signalBlockers > 0);
-                LastDirectRouteFallbackAllowed = advisoryLiveConflictWithoutMatchingRoute;
-                LastRouteRejected = !advisoryLiveConflictWithoutMatchingRoute
-                    && (blockingTrackOnAttemptedPath || routeLevelBlockerWithoutTrack);
-                LastBlockIsSoft = LastRouteRejected
-                    && occupiedBlockers + reservedBlockers == 0
-                    && !recordedBlockingTrackOnAttemptedPath;
-                LastRouteCheckPerformed = true;
-
-                if (!LastRouteRejected)
-                {
-                    if (HasMatchingRoute && Warnings.Length > 0)
-                    {
-                        LastRouteCheckNotice = "ADS check: " + Warnings.Length
-                            + (Warnings.Length == 1 ? " non-blocking warning; " : " non-blocking warnings; ")
-                            + Shorten(Warnings[0], 105);
-                    }
-                    else if (liveStateAvailable)
-                    {
-                        LastRouteCheckNotice = "ADS CHECK: connected; no blocking reservation, "
-                            + "occupancy, or signal conflict found on this route.";
-                    }
-                    else
-                    {
-                        LastRouteCheckNotice = "ADS connected, but this ADS version does not expose "
-                            + "live route-safety state.";
-                    }
-
-                    StatusDescription = LastRouteCheckNotice;
-                    Module.mod?.Logger.Log("ADS route check passed: " + LastRouteCheckNotice);
-                    return false;
-                }
-
-                BlockingTrackIds = blockedIds.ToArray();
-                NonReroutableTrackIds = nonReroutableIds.ToArray();
-                if (string.IsNullOrWhiteSpace(BlockingReason)
-                    || (!recordedBlockingTrackOnAttemptedPath
-                        && occupiedBlockers + reservedBlockers + signalBlockers > 0))
-                {
-                    BlockingReason = signalBlockers > 0 ? "SIGNAL_RESERVED"
-                        : occupiedBlockers > 0 ? "TRACK_OCCUPIED"
-                        : reservedBlockers > 0 ? "ROUTE_OVERLAP"
-                        : RouteReason;
-                }
-
-                string knownWarning = FormatKnownRouteWarningReason(BlockingReason);
-                LastRouteCheckNotice = !string.IsNullOrWhiteSpace(knownWarning)
-                    ? knownWarning
-                    : "ADS WARNING: the original route has a blocking conflict.";
-
-                if (occupiedBlockers + reservedBlockers + signalBlockers > 0)
-                {
-                    LastRouteCheckNotice += " Live ADS check: "
-                        + occupiedBlockers + " occupied, "
-                        + reservedBlockers + " route-reserved, "
-                        + signalBlockers + " signal-protected track(s).";
-                }
-
-                bool blockedStart = false;
-                bool blockedDestination = false;
-                bool blockedEndpointCannotBeRerouted = false;
-
-                for (int index = 0; index < path.Count; index++)
-                {
-                    RailTrack track = path[index];
-                    string adsTrackId = pathIds[index];
-                    if (string.IsNullOrWhiteSpace(adsTrackId) || !blockedIds.Contains(adsTrackId))
-                        continue;
-
-                    if (index == 0)
-                    {
-                        if (nonReroutableIds.Contains(adsTrackId))
-                            blockedEndpointCannotBeRerouted = true;
-                        else
-                            blockedStart = true;
-                    }
-                    else if (index == path.Count - 1)
-                    {
-                        if (nonReroutableIds.Contains(adsTrackId))
-                            blockedEndpointCannotBeRerouted = true;
-                        else
-                            blockedDestination = true;
-                    }
-                    else
-                        blockingTracks.Add(track);
-                }
-
-                // Occupancy and route ownership on the requested origin or
-                // destination remain present on every possible path. A proxy
-                // exclusion would only make the geometry look different while
-                // leaving the actual ADS conflict in place.
-                if (blockedEndpointCannotBeRerouted)
-                {
-                    blockingTracks.Clear();
-                    LastRouteCheckNotice += " The blocked route endpoint cannot be bypassed.";
-                    if (LastDirectRouteFallbackAllowed)
-                    {
-                        LastRouteCheckNotice += " Direct route kept because ADS reported only live occupancy/signal pressure without a matching ADS route.";
-                        StatusDescription = LastRouteCheckNotice;
-                        Module.mod?.Logger.Log("ADS reported an advisory live endpoint conflict without a matching ADS route; keeping the direct route.");
-                        return false;
-                    }
-
-                    StatusDescription = LastRouteCheckNotice;
-                    Module.mod?.Logger.Log("ADS rejected the route because its origin or destination "
-                        + "has a non-reroutable occupancy or route-lock conflict.");
-                    return false;
-                }
-
-                // The requested endpoints themselves cannot be removed from a
-                // route. If ADS reports one as blocked, exclude the first or
-                // last intermediate rail instead. This forces A* to choose a
-                // genuinely different departure or approach rather than
-                // silently returning the same path.
-                if (blockedStart)
-                    AddEndpointProxyExclusion(path, blockingTracks, true);
-                if (blockedDestination)
-                    AddEndpointProxyExclusion(path, blockingTracks, false);
-
-                // Route-level failures such as RESERVATION_LOST can arrive
-                // without a concrete conflict track. Force a different first
-                // leg so the warning still results in one alternate search.
-                if (blockingTracks.Count == 0 && blockedIds.Count == 0 && HasBlockingRouteReason)
-                    AddEndpointProxyExclusion(path, blockingTracks, true);
-
-                if (blockingTracks.Count == 0)
-                {
-                    Module.mod?.Logger.Log("ADS reported a blocking warning, but no avoidable rail "
-                        + "on the calculated route could be excluded.");
-                }
-                else
-                {
-                    StatusDescription = LastRouteCheckNotice;
-                    Module.mod?.Logger.Log("ADS rejected the original path: " + LastRouteCheckNotice);
-                }
-
-                return blockingTracks.Count > 0;
-            }
-            catch (Exception exception)
-            {
-                Exception cause = exception.GetBaseException();
-                Module.mod?.Logger.Log("ADS conflict-track mapping failed: " + cause.Message);
-                LastRouteCheckPerformed = true;
-                LastRouteCheckNotice = "ADS check unavailable: " + Shorten(cause.Message, 120);
-                LastRouteRejected = false;
-                blockingTracks.Clear();
-                return false;
-            }
+            LastRouteRejected = false;
+            LastBlockIsSoft = false;
+            LastDirectRouteFallbackAllowed = false;
+            LastRouteCheckPerformed = false;
+            LastRouteCheckNotice = null;
+            BlockingReason = null;
+            BlockingTrackIds = new string[0];
+            NonReroutableTrackIds = new string[0];
+            HasMatchingRoute = false;
+            HasBlockingRouteReason = false;
+            RouteReason = null;
+            MatchedRouteId = null;
+            StatusDescription = DisabledStatusDescription;
+            return false;
         }
 
         /// <summary>
@@ -762,141 +383,13 @@ namespace RevisedDVRoute.Compatibility
             out string routeOwner)
         {
             routeOwner = null;
-            if (junction == null)
-                return true;
-
-            UnityModManager.ModEntry adsMod = FindADSMod();
-            if (adsMod == null || !adsMod.Active)
-            {
+            if (junction != null)
                 LoggedBlockedJunctions.Remove(junction.GetInstanceID());
-                return true;
-            }
-
-            if (!EnsureApi())
-                return true;
-
-            try
-            {
-                object dispatcher = runtimeField.GetValue(null);
-                if (dispatcher == null)
-                    return true;
-
-                bool protectedAllowed = protectedSwitchAllowedMethod == null
-                    || Convert.ToBoolean(protectedSwitchAllowedMethod.Invoke(null,
-                        new object[] { junction, branch }));
-
-                object routeLocks = dispatcherRouteLocksField?.GetValue(dispatcher);
-                IDictionary junctionIds = dispatcherJunctionIdsField?.GetValue(dispatcher) as IDictionary;
-                if (routeLocks == null || junctionIds == null
-                    || routeLocksAllowsSwitchMethod == null || !junctionIds.Contains(junction))
-                    return protectedAllowed;
-
-                string junctionId = Convert.ToString(junctionIds[junction]);
-                if (string.IsNullOrWhiteSpace(junctionId))
-                    return true;
-
-                bool allowed = protectedAllowed && Convert.ToBoolean(
-                    routeLocksAllowsSwitchMethod.Invoke(routeLocks,
-                        new object[] { junctionId, branch }));
-                if (routeLocksSwitchOwnerMethod != null)
-                {
-                    routeOwner = Convert.ToString(routeLocksSwitchOwnerMethod.Invoke(routeLocks,
-                        new object[] { junctionId }));
-
-                    // ADS intentionally permits manual changes through normal
-                    // reservations, then invalidates the route as misaligned.
-                    // Automatic Route Manager alignment should be more
-                    // cooperative: preserve any active ADS route that requires
-                    // a different branch, regardless of reservation mode.
-                    int requiredBranch;
-                    if (allowed && !string.IsNullOrWhiteSpace(routeOwner)
-                        && TryGetADSRouteSwitchBranch(dispatcher, routeOwner,
-                            junctionId, out requiredBranch)
-                        && requiredBranch != branch)
-                        allowed = false;
-                }
-
-                if (allowed)
-                {
-                    LoggedBlockedJunctions.Remove(junction.GetInstanceID());
-                    routeOwner = null;
-                }
-
-                lastLoggedSwitchError = null;
-                return allowed;
-            }
-            catch (Exception exception)
-            {
-                string message = exception.GetBaseException().Message;
-                if (lastLoggedSwitchError != message)
-                {
-                    lastLoggedSwitchError = message;
-                    Module.mod?.Logger.Log("ADS switch-lock check failed open: " + message);
-                }
-                return true;
-            }
-        }
-
-        private static bool TryGetADSRouteSwitchBranch(object dispatcher,
-            string routeId, string junctionId, out int branch)
-        {
-            branch = -1;
-            if (dispatcher == null || string.IsNullOrWhiteSpace(routeId)
-                || string.IsNullOrWhiteSpace(junctionId) || routeStatesMethod == null
-                || planSwitchesField == null || routeStepIdField == null
-                || routeStepBranchField == null)
-                return false;
-
-            IEnumerable states = routeStatesMethod.Invoke(dispatcher, null) as IEnumerable;
-            if (states == null)
-                return false;
-
-            foreach (object state in states)
-            {
-                if (state == null
-                    || !string.Equals(ReadFieldString(stateIdField, state), routeId,
-                        StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(ReadFieldString(stateLifecycleField, state), "active",
-                        StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                object plan = statePlanField?.GetValue(state);
-                if (plan == null)
-                    return false;
-                IEnumerable steps = planSwitchesField.GetValue(plan) as IEnumerable;
-                if (steps == null)
-                    return false;
-
-                foreach (object step in steps)
-                {
-                    if (step == null || !string.Equals(
-                        Convert.ToString(routeStepIdField.GetValue(step)), junctionId,
-                        StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    branch = Convert.ToInt32(routeStepBranchField.GetValue(step));
-                    return true;
-                }
-                return false;
-            }
-
-            return false;
+            return true;
         }
 
         internal static void LogBlockedJunctionSwitch(Junction junction, string routeOwner)
         {
-            if (junction != null && !LoggedBlockedJunctions.Add(junction.GetInstanceID()))
-                return;
-
-            string junctionName = junction == null ? null : junction.junctionData.junctionIdLong;
-            if (string.IsNullOrWhiteSpace(junctionName))
-                junctionName = junction?.name ?? "unknown junction";
-
-            string owner = string.IsNullOrWhiteSpace(routeOwner)
-                ? "an ADS route"
-                : "ADS route " + routeOwner;
-            string message = owner + " locks " + junctionName + "; automatic switch skipped.";
-            Terminal.Log(message);
-            Module.mod?.Logger.Log(message);
         }
 
         /// <summary>

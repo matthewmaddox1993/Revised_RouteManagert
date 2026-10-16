@@ -179,6 +179,7 @@
     <Compile Include="Compatibility\DVSignalsRouteReservation.cs" />
     <Compile Include="Compatibility\MphCompatibility.cs" />
     <Compile Include="CommsRadio\RouteManagerStates.cs" />
+    <Compile Include="Driver\PIDController.cs" />
     <Compile Include="LocoCruiseControl.cs" />
     <Compile Include="LocoAI.cs" />
     <Compile Include="Extensions\GameObjectExtension.cs" />

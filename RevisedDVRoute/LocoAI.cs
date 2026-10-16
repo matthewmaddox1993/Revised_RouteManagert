@@ -14,6 +14,8 @@ namespace RevisedDVRoute
 {
     public class LocoAI : LocoCruiseControl
     {
+        protected override bool UseTrafficBraking => true;
+
         private const float TARGET_SPEED_DEFAULT = 20.0f;
         private const float COUPLER_APPROACH_SPEED = 5.0f;
         private const float SPEED_LIMIT_LOOKAHEAD_METERS = 3000.0f;
@@ -61,6 +63,8 @@ namespace RevisedDVRoute
         private bool _hasSoundedDepartureHorn = false;
         private bool? _lastHeadlightForward = null;
         private RouteSpeedProfile _lastRouteSpeedProfile;
+        private float _positionLostSince = -1f;
+        private const float POSITION_LOSS_GRACE_SECONDS = 2f;
         private LocoSim.Implementations.Port _cylinderCockPort;
         private bool _cylinderCockPortSearched = false;
 
@@ -529,6 +533,12 @@ namespace RevisedDVRoute
             RouteSpeedProfile profile = BuildRouteSpeedProfile(currentSpeedKph);
             _lastRouteSpeedProfile = profile;
             SignalHoldReason = profile.HoldReason;
+            StopDistanceMeters = profile.TargetSpeedKph <= 15f
+                && profile.LimitingReason != RouteSpeedLimitReason.IntegrationUnavailable
+                && profile.LimitingReason != RouteSpeedLimitReason.CurrentTrackLimit
+                && profile.LimitingReason != RouteSpeedLimitReason.ConsistLimit
+                ? profile.DistanceToRestriction
+                : float.PositiveInfinity;
             return profile.TargetSpeedKph;
         }
 
@@ -542,16 +552,39 @@ namespace RevisedDVRoute
 
             Route route = RouteTracker?.Route;
             IList<RailTrack> path = route?.Path;
-            if (path == null || path.Count == 0)
-                return CreateHoldProfile("Route position unavailable; holding");
-
-            int pathIndex = RouteTracker.CurrentPathIndex;
-            if (pathIndex < 0 || pathIndex >= path.Count
+            int pathIndex = RouteTracker?.CurrentPathIndex ?? -1;
+            if (path == null || path.Count == 0
+                || pathIndex < 0 || pathIndex >= path.Count
                 || RouteTracker.LeadingRailTrack == null
                 || path[pathIndex] != RouteTracker.LeadingRailTrack)
             {
+                // Junction transitions briefly lose the path position. Keep the
+                // previous target instead of slamming the brakes, like AI Traffic.
+                if (_positionLostSince < 0f)
+                    _positionLostSince = Time.time;
+                if (Time.time - _positionLostSince < POSITION_LOSS_GRACE_SECONDS
+                    && _lastRouteSpeedProfile.HoldReason == null
+                    && _lastRouteSpeedProfile.TargetSpeedKph > 0f)
+                    return _lastRouteSpeedProfile;
+
+                // Before the train is on the planned path (route start, or lined
+                // up with the wrong end), the tracker has no position yet. Holding
+                // here would keep the AI from ever reaching the route, so creep
+                // toward it at a crawl instead.
+                RouteTracker.TrackingState state = RouteTracker != null
+                    ? RouteTracker.TrackState : RouteTracker.TrackingState.OutOfWay;
+                if (state == RouteTracker.TrackingState.OnStart
+                    || state == RouteTracker.TrackingState.BeforeStart
+                    || state == RouteTracker.TrackingState.WrongHeading)
+                {
+                    ApplyProfileLimit(ref profile, ROUTE_CRAWL_SPEED_KPH,
+                        RouteSpeedLimitReason.CurrentTrackLimit);
+                    return profile;
+                }
+
                 return CreateHoldProfile("Route position unavailable; holding");
             }
+            _positionLostSince = -1f;
 
             ApplyProfileLimit(ref profile, GetTrackSpeedLimit(path[pathIndex]),
                 RouteSpeedLimitReason.CurrentTrackLimit);
@@ -624,12 +657,7 @@ namespace RevisedDVRoute
                     "AI Traffic reservation status unavailable; holding");
             }
 
-            if (currentTrackReserved)
-            {
-                return CreateHoldProfile("AI Traffic reservation on current track: "
-                    + (currentLogicTrack.ID?.FullID ?? "Current track"),
-                    RouteSpeedLimitReason.CurrentTrackReservation);
-            }
+            // The train is already on this track; only reservations ahead hold it.
 
             for (int index = pathIndex + 1;
                 index < path.Count && distanceToLimit <= SPEED_LIMIT_LOOKAHEAD_METERS;
@@ -690,7 +718,8 @@ namespace RevisedDVRoute
                 float signalTargetKph = signalSpeedKph <= 0f
                     ? CalculateStopApproachTargetKph(currentSpeedMps, restrictionDistance)
                     : CalculateSpeedReductionTargetKph(currentSpeedMps,
-                        restrictionDistance, signalSpeedKph,
+                        restrictionDistance,
+                        Compatibility.MphCompatibility.GetAiTargetSpeedKph(signalSpeedKph),
                         ROUTE_STOP_BUFFER_METERS);
                 ApplyProfileLimit(ref profile, signalTargetKph,
                     RouteSpeedLimitReason.SignalRestriction, signalReason,
@@ -1091,8 +1120,8 @@ namespace RevisedDVRoute
                             ? "n/a"
                             : _lastRouteSpeedProfile.DistanceToRestriction.ToString("0");
                         string holdDetails = $"[Loco AI] Holding: {SignalHoldReason}; "
-                            + $"track={currentTrackId}, speed={speed:0.0} km/h, "
-                            + $"target={TargetSpeed:0.0} km/h, "
+                            + $"track={currentTrackId}, speed={Compatibility.MphCompatibility.FormatSpeed(speed)}, "
+                            + $"target={Compatibility.MphCompatibility.FormatSpeed(TargetSpeed)}, "
                             + $"limit={_lastRouteSpeedProfile.LimitingReason}, "
                             + $"distance={restrictionDistance} m, "
                             + $"next-track={RouteTracker.DistanceToNextTrack:0} m";
