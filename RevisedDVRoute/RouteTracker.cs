@@ -533,7 +533,8 @@ namespace RevisedDVRoute
                     if (Route.Reverses.TryGetValue(pathData.junctionId, out junction))
                     {
                         TrackState = TrackingState.StopTrainAfterSwitch;
-                        Module.StartCoroutine(SwitchJunctionAfterIsFree(junction));
+                        Module.StartCoroutine(SwitchJunctionAfterIsFree(
+                            pathData.currentTrack, pathData.nextTrack, junction));
                         Route.Reverses.Remove(pathData.junctionId);
                     }
                 }
@@ -573,9 +574,15 @@ namespace RevisedDVRoute
         }*/
 
 
-        private IEnumerator SwitchJunctionAfterIsFree(Junction junction)
+        private IEnumerator SwitchJunctionAfterIsFree(RailTrack track,
+            RailTrack nextTrack, Junction junction)
         {
             bool reportedSignalReservation = false;
+            bool reportedADSReservation = false;
+            int branchIndex;
+            RailTrack trackToSwitch;
+            bool requestedBranchAvailable = Route.TryGetRequestedBranch(track,
+                nextTrack, junction, out branchIndex, out trackToSwitch);
             while (Running)
             {
 #if DEBUG2
@@ -594,21 +601,47 @@ namespace RevisedDVRoute
                     }
 
                     string reservationOwner;
-                    if (Compatibility.DVSignalsCompatibility.CanSwitchJunction(junction, out reservationOwner))
+                    if (!Compatibility.DVSignalsCompatibility.CanSwitchJunction(junction,
+                        out reservationOwner))
                     {
-                        junction.Switch(Junction.SwitchMode.REGULAR);
-                        TrackState = TrackingState.ReverseTrain;
-                        yield break;
+                        if (!reportedSignalReservation)
+                        {
+                            Compatibility.DVSignalsCompatibility.LogBlockedJunctionSwitch(
+                                junction, reservationOwner);
+                            reportedSignalReservation = true;
+                        }
+                        TrackState = TrackingState.WaitingForSignalReservation;
+                        yield return new WaitForSeconds(1.0f);
+                        continue;
                     }
 
-                    if (!reportedSignalReservation)
+                    if (requestedBranchAvailable)
                     {
-                        Compatibility.DVSignalsCompatibility.LogBlockedJunctionSwitch(junction, reservationOwner);
-                        reportedSignalReservation = true;
+                        string adsRouteOwner;
+                        if (!Compatibility.ADSCompatibility.CanSwitchJunction(
+                            junction, branchIndex, out adsRouteOwner))
+                        {
+                            if (!reportedADSReservation)
+                            {
+                                Compatibility.ADSCompatibility.LogBlockedJunctionSwitch(
+                                    junction, adsRouteOwner);
+                                reportedADSReservation = true;
+                            }
+                            TrackState = TrackingState.WaitingForSignalReservation;
+                            yield return new WaitForSeconds(1.0f);
+                            continue;
+                        }
+
+                        junction.Switch(Junction.SwitchMode.NO_SOUND, (byte)branchIndex);
+                        Compatibility.DVSignalsCompatibility.UnlogBlockedJunction(junction);
                     }
-                    TrackState = TrackingState.WaitingForSignalReservation;
-                    yield return new WaitForSeconds(1.0f);
-                    continue;
+                    else
+                    {
+                        junction.Switch(Junction.SwitchMode.REGULAR);
+                    }
+
+                    TrackState = TrackingState.ReverseTrain;
+                    yield break;
                 }
 
                 yield return new WaitForSeconds(0.2f);

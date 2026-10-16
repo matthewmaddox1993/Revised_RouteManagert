@@ -539,6 +539,13 @@ namespace RevisedDVRoute
             catch (CommandException exception)
             {
                 Module.mod?.Logger.Log("ADS alternate-route search failed: " + exception.Message);
+                if (Compatibility.ADSCompatibility.LastDirectRouteFallbackAllowed)
+                {
+                    LastADSAlternativeNotice = "ADS live occupied-track warning could not be rerouted; direct route kept.";
+                    Module.mod?.Logger.Log("ADS live conflict remained advisory without a matching ADS route; keeping the direct route.");
+                    return route;
+                }
+
                 throw new CommandException(
                     "ADS reported a blocked route; no alternate route was found");
             }

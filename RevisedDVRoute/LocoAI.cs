@@ -20,6 +20,10 @@ namespace RevisedDVRoute
         private const float SPEED_LIMIT_BRAKING_DECELERATION = 0.35f;
         private const float BRAKE_PIPE_RESPONSE_SECONDS = 4.0f;
         private const float SPEED_LIMIT_MARGIN_METERS = 15.0f;
+        private const float ROUTE_STOP_BUFFER_METERS = 20.0f;
+        private const float ROUTE_CRAWL_START_METERS = 120.0f;
+        private const float ROUTE_CRAWL_SPEED_KPH = 12.0f;
+        private const float ROUTE_FINAL_STOP_TAPER_METERS = 40.0f;
         private RouteTracker RouteTracker;
 
         public bool IsRunning => running;
@@ -56,8 +60,114 @@ namespace RevisedDVRoute
 
         private bool _hasSoundedDepartureHorn = false;
         private bool? _lastHeadlightForward = null;
+        private RouteSpeedProfile _lastRouteSpeedProfile;
         private LocoSim.Implementations.Port _cylinderCockPort;
         private bool _cylinderCockPortSearched = false;
+
+        private enum RouteSpeedLimitReason
+        {
+            None,
+            ConsistLimit,
+            CurrentTrackLimit,
+            HazardAhead,
+            CurrentTrackReservation,
+            TrackAheadBlocked,
+            SignalRestriction,
+            IntegrationUnavailable
+        }
+
+        private struct RouteSpeedProfile
+        {
+            public float TargetSpeedKph;
+            public string HoldReason;
+            public RouteSpeedLimitReason LimitingReason;
+            public float DistanceToRestriction;
+
+            public static RouteSpeedProfile Create(float targetSpeedKph,
+                RouteSpeedLimitReason limitingReason)
+            {
+                return new RouteSpeedProfile
+                {
+                    TargetSpeedKph = Mathf.Max(0f, targetSpeedKph),
+                    HoldReason = null,
+                    LimitingReason = limitingReason,
+                    DistanceToRestriction = float.PositiveInfinity
+                };
+            }
+        }
+
+        private static void ApplyProfileLimit(ref RouteSpeedProfile profile,
+            float targetSpeedKph, RouteSpeedLimitReason reason,
+            string holdReason = null,
+            float distanceToRestriction = float.PositiveInfinity)
+        {
+            if (float.IsNaN(targetSpeedKph) || float.IsInfinity(targetSpeedKph))
+                return;
+
+            targetSpeedKph = Mathf.Max(0f, targetSpeedKph);
+            bool stricter = targetSpeedKph < profile.TargetSpeedKph - 0.01f;
+            bool sameTarget = Mathf.Abs(targetSpeedKph - profile.TargetSpeedKph) <= 0.01f;
+            bool shouldAdopt = stricter || (sameTarget
+                && !string.IsNullOrWhiteSpace(holdReason)
+                && string.IsNullOrWhiteSpace(profile.HoldReason));
+            if (!shouldAdopt)
+                return;
+
+            profile.TargetSpeedKph = targetSpeedKph;
+            profile.HoldReason = holdReason;
+            profile.LimitingReason = reason;
+            profile.DistanceToRestriction = distanceToRestriction;
+        }
+
+        private static RouteSpeedProfile CreateHoldProfile(string holdReason,
+            RouteSpeedLimitReason limitingReason = RouteSpeedLimitReason.IntegrationUnavailable)
+        {
+            return new RouteSpeedProfile
+            {
+                TargetSpeedKph = 0f,
+                HoldReason = holdReason,
+                LimitingReason = limitingReason,
+                DistanceToRestriction = 0f
+            };
+        }
+
+        private static float CalculateSpeedReductionTargetKph(float currentSpeedMps,
+            float distanceToRestrictionMeters, float targetLimitKph,
+            float bufferMeters)
+        {
+            float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
+            float brakingDistance = Mathf.Max(0f,
+                distanceToRestrictionMeters - responseDistance - bufferMeters);
+            float targetLimitMps = Mathf.Max(0f, targetLimitKph) / 3.6f;
+            float allowedMps = Mathf.Sqrt(targetLimitMps * targetLimitMps
+                + 2f * SPEED_LIMIT_BRAKING_DECELERATION * brakingDistance);
+            return allowedMps * 3.6f;
+        }
+
+        private static float CalculateStopApproachTargetKph(float currentSpeedMps,
+            float distanceToRestrictionMeters)
+        {
+            if (float.IsNaN(distanceToRestrictionMeters)
+                || float.IsInfinity(distanceToRestrictionMeters))
+                return float.PositiveInfinity;
+
+            float stopTargetKph = CalculateSpeedReductionTargetKph(currentSpeedMps,
+                distanceToRestrictionMeters, 0f, ROUTE_STOP_BUFFER_METERS);
+            if (distanceToRestrictionMeters <= ROUTE_FINAL_STOP_TAPER_METERS)
+            {
+                return Mathf.Lerp(0f, ROUTE_CRAWL_SPEED_KPH, Mathf.Clamp01(
+                    distanceToRestrictionMeters / ROUTE_FINAL_STOP_TAPER_METERS));
+            }
+
+            if (distanceToRestrictionMeters <= ROUTE_CRAWL_START_METERS)
+                stopTargetKph = Mathf.Min(stopTargetKph, ROUTE_CRAWL_SPEED_KPH);
+
+            if (distanceToRestrictionMeters < ROUTE_STOP_BUFFER_METERS
+                || stopTargetKph < 3f)
+                return 0f;
+
+            return stopTargetKph;
+        }
 
         private IEnumerator SoundDepartureHorn(bool isReverse)
         {
@@ -416,66 +526,70 @@ namespace RevisedDVRoute
         /// </summary>
         private float GetRouteSpeedTarget(float currentSpeedKph)
         {
+            RouteSpeedProfile profile = BuildRouteSpeedProfile(currentSpeedKph);
+            _lastRouteSpeedProfile = profile;
+            SignalHoldReason = profile.HoldReason;
+            return profile.TargetSpeedKph;
+        }
+
+        private RouteSpeedProfile BuildRouteSpeedProfile(float currentSpeedKph)
+        {
             float maxLocoSpeed = GetConsistMaxLocoSpeed();
             float occupiedLimit = GetConsistOccupiedSpeedLimit();
-            float target = Mathf.Min(occupiedLimit, maxLocoSpeed);
+            RouteSpeedProfile profile = RouteSpeedProfile.Create(
+                Mathf.Min(occupiedLimit, maxLocoSpeed),
+                RouteSpeedLimitReason.ConsistLimit);
 
             Route route = RouteTracker?.Route;
             IList<RailTrack> path = route?.Path;
             if (path == null || path.Count == 0)
-            {
-                SignalHoldReason = "Route position unavailable; holding";
-                return 0f;
-            }
+                return CreateHoldProfile("Route position unavailable; holding");
 
             int pathIndex = RouteTracker.CurrentPathIndex;
             if (pathIndex < 0 || pathIndex >= path.Count
                 || RouteTracker.LeadingRailTrack == null
                 || path[pathIndex] != RouteTracker.LeadingRailTrack)
             {
-                SignalHoldReason = "Route position unavailable; holding";
-                return 0f;
+                return CreateHoldProfile("Route position unavailable; holding");
             }
 
-            target = Mathf.Min(target, GetTrackSpeedLimit(path[pathIndex]));
+            ApplyProfileLimit(ref profile, GetTrackSpeedLimit(path[pathIndex]),
+                RouteSpeedLimitReason.CurrentTrackLimit);
+
             double distanceToLimit = Math.Max(0.0, RouteTracker.DistanceToNextTrack);
             float currentSpeedMps = currentSpeedKph / 3.6f;
             Trainset trainset = RouteTracker?.Trainset ?? trainCar?.trainset;
-            string activeHoldReason = null;
             var ownCarIds = new HashSet<string>(trainset?.cars == null
                 ? Enumerable.Empty<string>()
-                : trainset.cars.Where(car => car?.logicCar != null).Select(car => car.logicCar.ID));
+                : trainset.cars.Where(car => car?.logicCar != null)
+                    .Select(car => car.logicCar.ID));
 
             Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
 
-            // AI Traffic's reservation graph does not report the distance to
-            // a train already on our track, or a facing signal at STOP. Its
-            // SignalRegistry does both using live bogies and signal aspects.
             var upcomingTracks = new List<RailTrack>();
             for (int index = pathIndex + 1; index < path.Count; index++)
                 upcomingTracks.Add(path[index]);
+
+            float obstacleDistance;
+            float stopSignalDistance;
             if (!Compatibility.AITrafficCompatibility.TryGetHazardsAhead(
                 path[pathIndex], RouteTracker.LeadingTrackSpan,
                 RouteTracker.LeadingTrackDirection, upcomingTracks, trainset, trainCar,
-                out float obstacleDistance, out float stopSignalDistance))
+                out obstacleDistance, out stopSignalDistance))
             {
-                SignalHoldReason = "AI Traffic signal/obstacle status unavailable; holding";
-                return 0f;
+                return CreateHoldProfile(
+                    "AI Traffic signal/obstacle status unavailable; holding");
             }
 
+            float dvStopDistance;
             if (!Compatibility.DVSignalsCompatibility.TryGetStopSignalAhead(
                 path, pathIndex, RouteTracker.LeadingTrackSpan,
-                RouteTracker.LeadingTrackDirection, out float dvStopDistance))
+                RouteTracker.LeadingTrackDirection, out dvStopDistance))
             {
-                SignalHoldReason = "DV Signals aspect status unavailable; holding";
-                return 0f;
+                return CreateHoldProfile("DV Signals aspect status unavailable; holding");
             }
             stopSignalDistance = Mathf.Min(stopSignalDistance, dvStopDistance);
 
-            // AI Traffic's generic obstacle scan cannot distinguish the
-            // parked consist we were explicitly sent to couple to. During
-            // that approach our own scan and the per-track checks below still
-            // protect against every unrelated consist.
             bool couplingTargetPresent = _intendedApproachTrainsets.Any(
                 candidate => candidate != null && candidate != trainset)
                 || (RouteTracker.CurrentTask?.TrainSets?.Any(
@@ -490,21 +604,14 @@ namespace RevisedDVRoute
                 localObstacleDistance), stopSignalDistance);
             if (!float.IsPositiveInfinity(hazardDistance))
             {
-                float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
-                float stopDistance = Mathf.Max(0f,
-                    hazardDistance - responseDistance - 20f);
-                float stopTarget = Mathf.Sqrt(2f * SPEED_LIMIT_BRAKING_DECELERATION
-                    * stopDistance) * 3.6f;
-                if (hazardDistance < 20f || stopTarget < 3f)
-                    stopTarget = 0f;
-                if (stopTarget < target)
-                {
-                    target = stopTarget;
-                    activeHoldReason = stopSignalDistance <= obstacleDistance
-                        && stopSignalDistance <= localObstacleDistance
-                        ? "DV Signals STOP aspect ahead"
-                        : "Train ahead on route";
-                }
+                string hazardHoldReason = stopSignalDistance <= obstacleDistance
+                    && stopSignalDistance <= localObstacleDistance
+                    ? "DV Signals STOP aspect ahead"
+                    : "Train ahead on route";
+                ApplyProfileLimit(ref profile,
+                    CalculateStopApproachTargetKph(currentSpeedMps, hazardDistance),
+                    RouteSpeedLimitReason.HazardAhead, hazardHoldReason,
+                    hazardDistance);
             }
 
             Track currentLogicTrack = path[pathIndex].LogicTrack();
@@ -513,107 +620,84 @@ namespace RevisedDVRoute
                 path[pathIndex], out currentTrackReserved)
                 && Compatibility.AITrafficCompatibility.IsActive)
             {
-                SignalHoldReason = "AI Traffic reservation status unavailable; holding";
-                return 0f;
+                return CreateHoldProfile(
+                    "AI Traffic reservation status unavailable; holding");
             }
 
             if (currentTrackReserved)
             {
-                SignalHoldReason = "AI Traffic reservation on current track: "
-                    + (currentLogicTrack.ID?.FullID ?? "Current track");
-                return 0f;
+                return CreateHoldProfile("AI Traffic reservation on current track: "
+                    + (currentLogicTrack.ID?.FullID ?? "Current track"),
+                    RouteSpeedLimitReason.CurrentTrackReservation);
             }
 
-            // ── Check speed limits & intermediate obstacles ahead on path ─────
             for (int index = pathIndex + 1;
                 index < path.Count && distanceToLimit <= SPEED_LIMIT_LOOKAHEAD_METERS;
                 index++)
             {
                 RailTrack nextRailTrack = path[index];
-                if (nextRailTrack == null) break;
+                if (nextRailTrack == null)
+                    break;
 
-                // Upcoming track speed limit
                 float nextLimit = Mathf.Min(GetTrackSpeedLimit(nextRailTrack), maxLocoSpeed);
-                if (nextLimit < target)
-                {
-                    float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
-                    float brakingDistance = Mathf.Max(0f,
-                        (float)distanceToLimit - responseDistance - SPEED_LIMIT_MARGIN_METERS);
-                    float nextLimitMps = nextLimit / 3.6f;
-                    float allowedMps = Mathf.Sqrt(nextLimitMps * nextLimitMps
-                        + 2f * SPEED_LIMIT_BRAKING_DECELERATION * brakingDistance);
-                    target = Mathf.Min(target, allowedMps * 3.6f);
-                }
+                ApplyProfileLimit(ref profile, CalculateSpeedReductionTargetKph(
+                    currentSpeedMps, (float)distanceToLimit, nextLimit,
+                    SPEED_LIMIT_MARGIN_METERS),
+                    RouteSpeedLimitReason.CurrentTrackLimit);
 
                 Track logicTrack = nextRailTrack.LogicTrack();
                 if (logicTrack == null)
                     break;
 
-                // Stop for any unrelated train ahead, including on the final
-                // track. Only the task's explicitly targeted consist is allowed
-                // to occupy the destination for a coupling approach.
                 bool aiTrafficReserved;
                 bool trafficStateAvailable = Compatibility.AITrafficCompatibility
                     .TryIsTrackReservedLive(nextRailTrack, out aiTrafficReserved);
                 bool trafficStateUnknown = !trafficStateAvailable
                     && Compatibility.AITrafficCompatibility.IsActive;
                 aiTrafficReserved = aiTrafficReserved || trafficStateUnknown;
-                bool occupiedByUnrelatedTrain = IsTrackOccupiedByUnrelatedTrain(logicTrack, ownCarIds);
+                bool occupiedByUnrelatedTrain = IsTrackOccupiedByUnrelatedTrain(
+                    logicTrack, ownCarIds);
                 if (aiTrafficReserved || occupiedByUnrelatedTrain)
                 {
-                    float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
-                    float stopBrakingDistance = Mathf.Max(0f, (float)distanceToLimit - responseDistance - 20.0f);
-                    float allowedStopMps = Mathf.Sqrt(2f * SPEED_LIMIT_BRAKING_DECELERATION * stopBrakingDistance);
-                    float stopTarget = allowedStopMps * 3.6f;
-                    if (distanceToLimit < 15.0 || stopTarget < 3.0f)
-                        stopTarget = 0f;
-
-                    if (stopTarget < target)
-                    {
-                        target = stopTarget;
-                        activeHoldReason = trafficStateUnknown
-                            ? "AI Traffic reservation status unavailable; holding before "
-                                + (logicTrack.ID?.FullID ?? "track ahead")
-                            : aiTrafficReserved
-                            ? "Waiting for AI Traffic reservation: " + (logicTrack.ID?.FullID ?? "Ahead")
-                            : "Track occupied: " + (logicTrack.ID?.FullID ?? "Ahead");
-                    }
+                    string holdReason = trafficStateUnknown
+                        ? "AI Traffic reservation status unavailable; holding before "
+                            + (logicTrack.ID?.FullID ?? "track ahead")
+                        : aiTrafficReserved
+                        ? "Waiting for AI Traffic reservation: "
+                            + (logicTrack.ID?.FullID ?? "Ahead")
+                        : "Track occupied: " + (logicTrack.ID?.FullID ?? "Ahead");
+                    ApplyProfileLimit(ref profile, CalculateStopApproachTargetKph(
+                        currentSpeedMps, (float)distanceToLimit),
+                        RouteSpeedLimitReason.TrackAheadBlocked, holdReason,
+                        (float)distanceToLimit);
                 }
 
                 distanceToLimit += Math.Max(0.0, logicTrack.length);
             }
 
-            // ── Check Signals & Route Block Reservations (DV Signals & ADS) ───
+            double distanceToSignal;
+            float signalSpeedKph;
+            string signalReason;
             if (Compatibility.DVSignalsRouteReservation.GetSignalRestrictionAhead(
                 route,
                 pathIndex,
                 RouteTracker.DistanceToNextTrack,
-                out double distanceToSignal,
-                out float signalSpeedKph,
-                out string signalReason))
+                out distanceToSignal,
+                out signalSpeedKph,
+                out signalReason))
             {
-                float responseDistance = currentSpeedMps * BRAKE_PIPE_RESPONSE_SECONDS;
-                float targetSignalMps = signalSpeedKph / 3.6f;
-                // Aim to stop 20m before the signal / block boundary
-                float signalBrakingDistance = Mathf.Max(0f, (float)distanceToSignal - responseDistance - 20.0f);
-                float allowedSignalMps = Mathf.Sqrt(targetSignalMps * targetSignalMps
-                    + 2f * SPEED_LIMIT_BRAKING_DECELERATION * signalBrakingDistance);
-                float signalTargetKph = allowedSignalMps * 3.6f;
-
-                if (signalSpeedKph <= 0f && (distanceToSignal < 20.0 || signalTargetKph < 3.0f))
-                {
-                    signalTargetKph = 0f;
-                }
-
-                if (signalTargetKph < target)
-                {
-                    target = signalTargetKph;
-                    activeHoldReason = signalReason;
-                }
+                float restrictionDistance = (float)Math.Max(0.0, distanceToSignal);
+                float signalTargetKph = signalSpeedKph <= 0f
+                    ? CalculateStopApproachTargetKph(currentSpeedMps, restrictionDistance)
+                    : CalculateSpeedReductionTargetKph(currentSpeedMps,
+                        restrictionDistance, signalSpeedKph,
+                        ROUTE_STOP_BUFFER_METERS);
+                ApplyProfileLimit(ref profile, signalTargetKph,
+                    RouteSpeedLimitReason.SignalRestriction, signalReason,
+                    restrictionDistance);
             }
 
-            SignalHoldReason = activeHoldReason;
-            return target;
+            return profile;
         }
 
         /// <summary>
@@ -1002,9 +1086,15 @@ namespace RevisedDVRoute
                             && activePathIndex < activePath.Count
                             ? activePath[activePathIndex].LogicTrack()?.ID?.FullID ?? "unknown"
                             : "unknown";
+                        string restrictionDistance = float.IsInfinity(
+                            _lastRouteSpeedProfile.DistanceToRestriction)
+                            ? "n/a"
+                            : _lastRouteSpeedProfile.DistanceToRestriction.ToString("0");
                         string holdDetails = $"[Loco AI] Holding: {SignalHoldReason}; "
                             + $"track={currentTrackId}, speed={speed:0.0} km/h, "
                             + $"target={TargetSpeed:0.0} km/h, "
+                            + $"limit={_lastRouteSpeedProfile.LimitingReason}, "
+                            + $"distance={restrictionDistance} m, "
                             + $"next-track={RouteTracker.DistanceToNextTrack:0} m";
                         Terminal.Log(holdDetails);
                         Module.mod?.Logger.Log(holdDetails);

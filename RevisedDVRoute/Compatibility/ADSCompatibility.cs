@@ -231,6 +231,15 @@ namespace RevisedDVRoute.Compatibility
         /// not an acceptable way to avoid it.
         /// </summary>
         internal static bool LastBlockIsSoft { get; private set; }
+
+        /// <summary>
+        /// True when ADS only exposes live occupancy or signal pressure on the
+        /// route, without a matching ADS route or route-lock conflict. Revised
+        /// DV Route still tries one alternate search, but keeps the direct
+        /// route when no different path exists because ADS treats that state as
+        /// advisory rather than a hard route-registration failure.
+        /// </summary>
+        internal static bool LastDirectRouteFallbackAllowed { get; private set; }
         private static bool LastRouteCheckPerformed { get; set; }
         private static string LastRouteCheckNotice { get; set; }
 
@@ -258,6 +267,7 @@ namespace RevisedDVRoute.Compatibility
             InvalidateAuthorityCache();
             LastRouteRejected = false;
             LastBlockIsSoft = false;
+            LastDirectRouteFallbackAllowed = false;
             LastRouteCheckPerformed = false;
             LastRouteCheckNotice = null;
         }
@@ -590,8 +600,13 @@ namespace RevisedDVRoute.Compatibility
                     !string.IsNullOrWhiteSpace(id) && blockedIds.Contains(id));
                 bool routeLevelBlockerWithoutTrack = HasBlockingRouteReason
                     && BlockingTrackIds.Length == 0;
-                LastRouteRejected = blockingTrackOnAttemptedPath
-                    || routeLevelBlockerWithoutTrack;
+                bool advisoryLiveConflictWithoutMatchingRoute = !HasMatchingRoute
+                    && !HasBlockingRouteReason
+                    && reservedBlockers == 0
+                    && (occupiedBlockers > 0 || signalBlockers > 0);
+                LastDirectRouteFallbackAllowed = advisoryLiveConflictWithoutMatchingRoute;
+                LastRouteRejected = !advisoryLiveConflictWithoutMatchingRoute
+                    && (blockingTrackOnAttemptedPath || routeLevelBlockerWithoutTrack);
                 LastBlockIsSoft = LastRouteRejected
                     && occupiedBlockers + reservedBlockers == 0
                     && !recordedBlockingTrackOnAttemptedPath;
@@ -683,6 +698,14 @@ namespace RevisedDVRoute.Compatibility
                 {
                     blockingTracks.Clear();
                     LastRouteCheckNotice += " The blocked route endpoint cannot be bypassed.";
+                    if (LastDirectRouteFallbackAllowed)
+                    {
+                        LastRouteCheckNotice += " Direct route kept because ADS reported only live occupancy/signal pressure without a matching ADS route.";
+                        StatusDescription = LastRouteCheckNotice;
+                        Module.mod?.Logger.Log("ADS reported an advisory live endpoint conflict without a matching ADS route; keeping the direct route.");
+                        return false;
+                    }
+
                     StatusDescription = LastRouteCheckNotice;
                     Module.mod?.Logger.Log("ADS rejected the route because its origin or destination "
                         + "has a non-reroutable occupancy or route-lock conflict.");

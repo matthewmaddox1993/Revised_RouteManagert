@@ -406,22 +406,37 @@ namespace RevisedDVRoute
 
         }
 
-        private static bool SwitchJunctionIfNeeded(RailTrack track, RailTrack nextTrack, Junction junction)
+        internal static bool TryGetRequestedBranch(RailTrack track, RailTrack nextTrack,
+            Junction junction, out int branchIndex, out RailTrack trackToSwitch)
         {
-            int branchIndex = -1;
+            branchIndex = -1;
+            trackToSwitch = null;
+            if (track == null || nextTrack == null || junction == null
+                || junction.inBranch == null || junction.outBranches == null)
+                return false;
 
-            RailTrack trackToSwitch = junction.inBranch.track == track ? nextTrack : track;
-
+            trackToSwitch = junction.inBranch.track == track ? nextTrack : track;
             for (int i = 0; i < junction.outBranches.Count; i++)
             {
                 if (junction.outBranches[i].track == trackToSwitch)
                 {
                     branchIndex = i;
-                    break;
+                    return true;
                 }
             }
 
-            if (branchIndex != -1 && branchIndex != junction.selectedBranch)
+            return false;
+        }
+
+        private static bool SwitchJunctionIfNeeded(RailTrack track, RailTrack nextTrack, Junction junction)
+        {
+            int branchIndex;
+            RailTrack trackToSwitch;
+            if (!TryGetRequestedBranch(track, nextTrack, junction,
+                out branchIndex, out trackToSwitch))
+                return false;
+
+            if (branchIndex != junction.selectedBranch)
             {
                 Compatibility.AITrafficCompatibility.RefreshReservationSnapshot();
                 if (Compatibility.AITrafficCompatibility.IsJunctionReserved(junction, out _))

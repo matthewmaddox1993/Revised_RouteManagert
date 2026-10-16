@@ -9,6 +9,9 @@ All notable changes to Revised DV Route are recorded here.
 - Changed route searches to use Dijkstra ordering for dynamic track costs and yield between batches on Unity's main thread, where rail and junction state can be read safely.
 - Used live AI Traffic reservations while driving, rather than relying on the route planner's one-second snapshot when entering a block.
 - Added AI Traffic's live bogie-distance and facing-signal checks so trains can brake for traffic on the current track and for STOP aspects before the next track boundary.
+- Refactored locomotive AI speed control into a dedicated hazard/speed-profile pipeline, inspired by AI Traffic's driver design while retaining Revised DV Route's route, ADS, and DV Signals integrations.
+- Made reverse-manoeuvre junction switching use the same exact branch selection and ADS protected-switch checks as initial route alignment, preventing compatibility gaps during route reversals.
+- Treated live ADS occupied-track or signal warnings without a matching ADS route as advisory: route planning now tries one reroute, then keeps the direct route with a warning when no different path exists.
 - Added a DV Signals STOP-aspect check at each facing signal's actual mast position, including when AI Traffic is not installed; reservations alone no longer stand in for signal aspects.
 - Measured unrelated bogies ahead on the current track without treating trains behind the AI as immediate obstacles. Kept the selected stationary consist exempt during a coupling approach while other trains remain blockers.
 - Prevented automatic switch changes when AI Traffic protects a junction or DV Signals reservation status cannot be read.
