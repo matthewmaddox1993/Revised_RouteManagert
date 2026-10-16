@@ -2,7 +2,7 @@
 
 Revised DV Route is a route-management mod for **Derail Valley build 99.7**. It adds route planning, automatic junction alignment, route tracking, cruise control, and experimental locomotive automation to the Comms Radio. Optional integrations support DV Signals interlocking, AI Traffic right-of-way, and both DoubleTrack layouts. Advanced Dispatcher System (ADS) is not supported.
 
-> **Version:** 1.0.4<br>
+> **Version:** 1.0.5<br>
 > **Status:** Route planning and switching are ready for normal use. Cruise control, locomotive AI, and automated freight hauling remain experimental and should be supervised.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete update notes.
@@ -17,9 +17,9 @@ Revised DV Route is based on the original **DV Route Manager** created by **Wall
 - Aligns junctions for the selected route and tracks progress to the destination.
 - Provides route information, train information, route reversal, a train-end alarm, and route clearing through the Comms Radio.
 - Includes PID-based cruise control for supported locomotives, including DM3 and steam locomotives.
-- Includes experimental locomotive AI and freight-haul automation with route-aware direction selection, a hazard/speed-profile driving pipeline, signal and occupancy braking, speed-limit lookahead, and safe reverser handling.
-- Prefers clear routes around DV Signals and AI Traffic reservations using a single bounded penalty per reserved corridor, so a busy block no longer causes a huge detour. It also maintains a rolling player-route block reservation so both mods can cooperate on player right-of-way.
-- Exposes the reserved player route to AI Traffic through DV Signals so conflicting AI trains can yield.
+- Includes experimental locomotive AI and freight-haul automation with route-aware direction selection, a hazard/speed-profile driving pipeline, signal and occupancy braking, speed-limit lookahead, and safe reverser handling. Its AI throttle and brake controllers account for acceleration, grades, and stopping distance.
+- Prefers clear routes around DV Signals and AI Traffic reservations using a single bounded penalty per reserved corridor, so a busy block no longer causes a huge detour.
+- Can reserve the occupied DV Signals block when the optional player-route setting is enabled, exposing the route to AI Traffic so conflicting AI trains can yield.
 - Routes appropriately for the DoubleTrack layout actually loaded in the current world and excludes its abandoned and deliberate derailment tracks.
 - Shows dependency and compatibility status directly in Unity Mod Manager's F10 panel.
 
@@ -78,7 +78,7 @@ Cruise control can hold the current speed, 30 km/h, 60 km/h, or an adjusted targ
 
 Automatic routing starts from the physical end of the consist lying ahead of the controlled locomotive. The AI derives forward or reverse from the route's first transition rather than from the previous reverser position. It closes the throttle and secures the train before changing direction, verifies the requested reverser position, and releases the brakes only after direction is established. A reversal is issued only for an explicit planned manoeuvre and is re-armed only after the train moves in the selected direction. If gravity rolls the consist backward on a grade, the AI brakes the rollback and builds power in the existing direction instead of flipping the reverser.
 
-While driving, the AI builds a live hazard and speed profile from locomotive and occupied-track speed limits, upcoming lower limits, foreign occupancy, AI Traffic reservations, DV Signals restrictions, rotating turntables, planned route reversals, and destination approach conditions. It now also uses a crawl-style final approach when braking to occupied tracks, protected signals, and reserved route boundaries. When the AI holds at a stop signal, protected block, or occupied track, it finishes the stop on the train brake and applies a stronger train and independent brake hold near standstill, so the consist does not roll backward on a grade. These protections remain experimental; the player should continue supervising the train.
+While driving, the AI builds a live hazard and speed profile from locomotive and occupied-track speed limits, upcoming lower limits, foreign occupancy, AI Traffic reservations, DV Signals restrictions, rotating turntables, planned route reversals, and destination approach conditions. Its throttle control uses acceleration feedback and extra power for slow uphill starts; its brake control uses speed and distance to prepare for restrictions ahead. It keeps the previous speed target for up to two seconds if route tracking briefly loses position at a junction and crawls toward the planned path when starting just outside it. The AI uses a crawl-style final approach when braking to occupied tracks, protected signals, and reserved route boundaries. At a stop, it finishes on the train brake and applies a stronger train and independent brake hold near standstill to limit rollback on a grade. These protections remain experimental; the player should continue supervising the train.
 
 These systems interact with live traffic, signals, grades, braking, and locomotive controls. Keep control of the train while testing them, particularly with long consists, steam locomotives, or unfamiliar routes.
 
@@ -90,7 +90,7 @@ All integrations below are optional unless marked required. Revised DV Route doe
 |---|---|---|
 | CommsRadioAPI | Required | Supplies the Comms Radio mode and controls. |
 | [DoubleTrack](https://github.com/Chump-the-Lump/DV-DoubleTrack) | Optional | Detects the physical layout currently loaded by DoubleTrack. Normal layout routes prefer right-hand-running paired lanes and avoid unnecessary crossovers. Hard layout routes use its loaded topology without Normal-layout lane assumptions. Tracks tagged by DoubleTrack as `Abandoned` or `Derail-*` are never selected. |
-| DV Signals | Optional | Prefers unreserved blocks (one bounded penalty each time a route enters a reserved corridor), retains reserved single-corridor tracks as a last-resort route, and never changes a junction protected by a foreign reservation. For the active player route it reserves the occupied signal block (never the block ahead) and releases it after the complete train clears it. The player's own reservation never stops the player's own locomotive AI. If DV Signals invalidates the reservation, local writes are suspended for that route to prevent an aspect-update feedback loop. |
+| DV Signals | Optional | Prefers unreserved blocks (one bounded penalty each time a route enters a reserved corridor), retains reserved single-corridor tracks as a last-resort route, and never changes a junction protected by a foreign reservation. When player-route reservation is enabled, it reserves the occupied signal block (never the block ahead) and releases it after the complete train clears it. The player's own reservation never stops the player's own locomotive AI. If DV Signals invalidates the reservation, local writes are suspended for that route to prevent an aspect-update feedback loop. |
 | [AI Traffic](https://github.com/Killermops27/dv-ai-traffic) | Optional; requires DV Signals for player right-of-way | Reads AI Traffic's active track reservations before each route search and prefers an unreserved path when it costs a reasonable amount of extra distance. AI Traffic recognizes Revised DV Route's non-AI DV Signals reservation as player right-of-way. Conflicting AI trains keep their physical-safety and approach-locking protections while yielding when safe. Enable **Player Priority** in AI Traffic for player-first dispatching behavior. |
 | DriverAssist | Optional | Includes compatibility safeguards so known job-registration and unsupported-locomotive conditions do not abort game loading. |
 | Revised_Mph | Optional | Loads before Revised DV Route and uses the MPH value displayed by converted speed signs when calculating AI speed targets. Runtime enable/disable changes are detected automatically. |
@@ -133,7 +133,7 @@ Available settings are:
 |---|---:|---|
 | Reversing strategy | OnlyIfNeeded | Controls how the route planner considers reversals. It can also be changed through the Comms Radio settings page. |
 | Respect DV Signals reservations | Enabled | Discourages foreign-reserved blocks and prevents automatic changes to protected junctions. Disable only if you intentionally want standard routing behavior. |
-| Reserve current DV Signals block for active route | Disabled | Claims one rolling player-route block through DV Signals, allowing signal aspects and compatible AI traffic to honor the selected route. Multiplayer requests use DV Signals' host-authoritative reservation API. An externally invalidated reservation is not repeatedly reclaimed on the same route. |
+| Reserve current DV Signals block for active route (turns shared signals red) | Disabled | Claims the occupied signal block through DV Signals, allowing compatible AI traffic to honor the selected route. DV Signals can turn other signals sharing that block red. Multiplayer requests use DV Signals' host-authoritative reservation API. An externally invalidated reservation is not repeatedly reclaimed on the same route. |
 | Train-end alarm key | `N` | Notifies the active route tracker that the train end has passed. |
 
 ## Command Terminal
@@ -160,14 +160,14 @@ route auto stop
 | DoubleTrack says `waiting for the world layout` | Load into a railway world and wait for the scene to finish loading. Create a route afterward. |
 | Normal layout is active while Hard is selected | Reload the world after saving the DoubleTrack mode. The saved selection does not replace rails already spawned in the current scene. |
 | A junction was not switched automatically | Check whether DV Signals has an active reservation on the junction. Revised DV Route leaves protected junctions unchanged. |
-| Route is longer than expected (with ADS + AI Traffic + DV Signals) | Working as designed. When ADS and AI Traffic are active, live track reservations are checked before planning. If an AI train is on or using the shortest path at that moment, Revised DV Route avoids that block (ADS may show an occupied-track warning) and picks another route, which may be longer. ADS compatibility is disabled in Revised DV Route, so ADS only adds its own warnings. AI Traffic honors the player's route once it exists (with **Player Priority** enabled), but cannot yield to a route planned while an AI train is already on that block. **Flip** can also reuse the same path when no true opposite exit is free. To fix: wait for the AI train to pass, clear the route, and plan again. Once the block is free the shorter path is preferred. |
+| Route is longer than expected with AI Traffic or DV Signals | The planner adds a bounded cost when entering a reserved corridor, so a clear alternative can be chosen. Wait for the other train to clear, then clear the route and plan again. The shorter path may then be available. ADS is not consulted by the planner. |
 | ADS is installed | ADS compatibility is disabled in Revised DV Route. Disable ADS while using this mod; DV Signals and AI Traffic are the supported signaling and traffic integrations. |
 | Flipping says no opposite-heading path exists | Flip excludes the active route's first segment and searches the live rail graph again. Some origins—especially dead ends or Hard-layout corridors—have no second departure path. The log records the excluded segment and search rejection counts. |
-| AI Traffic does not yield to the route | Confirm DV Signals and AI Traffic are enabled, enable **Player Priority** in AI Traffic, and leave both DV Signals settings enabled in Revised DV Route. The F10 panel should report an active handoff. Existing AI trains inside an approach-locking or physically occupied block retain safety priority until clear. |
+| AI Traffic does not yield to the route | Confirm DV Signals and AI Traffic are enabled, enable **Player Priority** in AI Traffic, and enable both DV Signals settings in Revised DV Route. Player-route reservation is off by default. Check the F10 panel for reservation status. Existing AI trains inside an approach-locking or physically occupied block retain safety priority until clear. |
 | The signal in front of me turns red when I create a route, or the console shows `Reservation failed: no tracks could be reserved` repeatedly | DV Signals turns every signal sharing a reserved block red. Route reservation is now off by default; keep "Reserve current DV Signals block for active route" disabled. If enabled, it reserves only the occupied block and retries back off quietly. |
 | The log says the route is waiting for a DV Signals block | Another train or signal currently owns an overlapping block. Keep the train stopped at the signal; Revised DV Route retries an initially unavailable block. If DV Signals invalidates a previously owned block, local reservation writes are suspended until a new route is selected so the two mods cannot enter an aspect-update loop. |
-| The locomotive reverser alternates between forward and reverse | Stop automation and verify that the current 1.0.4 build is installed. Reverser changes now occur only for explicit `ReverseTrain` manoeuvres; rollback on a grade is stopped and recovered without changing direction. |
-| The AI stops at a signal and the train rolls back | Fixed in 1.0.4: low-speed stops now keep a firm train and independent brake hold. If it still happens on a very steep grade with a heavy consist, stop the automation, take manual control, and report the log. |
+| The locomotive reverser alternates between forward and reverse | Stop automation and verify that the current 1.0.5 build is installed. Reverser changes should occur only for explicit `ReverseTrain` manoeuvres; rollback on a grade should be stopped without changing direction. |
+| The AI stops at a signal and the train rolls back | Version 1.0.5 strengthens low-speed train and independent brake holds. If rollback still occurs, stop the automation, take manual control, and report the log with the grade and consist details. |
 | AI or cruise control behaves unexpectedly | Stop the automation, take manual control, and report the situation with the mod log and the route/locomotive involved. |
 
 ## Gameplay performance
@@ -184,7 +184,7 @@ Visual Studio 2022 (or MSBuild), the .NET Framework 4.8 Developer Pack, a Derail
 MSBuild RevisedDVRoute\RevisedDVRoute.csproj /t:Rebuild /p:Configuration=Release /p:DVInstallPath="C:\Steam\steamapps\common\Derail Valley"
 ```
 
-The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.4.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
+The release archive is written to `RevisedDVRoute\bin\Release\RevisedDVRoute-1.0.5.zip`. The archive version is read from `Info.json`, and the WAV files are copied into `bin\Release\audio` before being packaged. Add `/p:BuildGameCopy=true` to copy the built mod files to the game's mod directory after a successful build.
 
 For an isolated test build, select the **Test** solution configuration in Visual Studio/Rider or run:
 
